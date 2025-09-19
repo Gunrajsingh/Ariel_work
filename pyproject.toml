@@ -9,6 +9,7 @@ authors = [{ name = "jmdm", email = "jmdm.880@gmail.com" }]
 classifiers = ["Development Status :: 2 - Pre-Alpha"]
 
 dependencies = [
+    "deap>=1.4.3",
     "matplotlib>=3.9.4",
     "mujoco>=3.3.6",
     "networkx>=3.2.1",
