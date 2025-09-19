@@ -39,12 +39,12 @@ You can activate the uv virtual environment the same way you would activate a no
 ## Installation using dev containers
 
 1. Install the `dev containers` extension on vs code.
-![dev_containers](../resources/dev_containers_1.png)
+![dev_containers](../resources/dev_containers_1.jpg)
 
 2. Open the ARIEL folder in vs code
 
 3. You should automatically see an pop up on the bottom right of your screen that asks you to create a dev container for this project. This will create a `.devcontainer` folder in your directory. If you already have a `.devcontainer` folder, vs code will ask you to reopen the container.
-![reopen_dev_container](../resources/dev_containers_2.png)
+![reopen_dev_container](../resources/dev_containers_2.jpg)
 
 4. If you do not see the popup asking you to create/reopen the container you can do it manually using `ctrl+shift+p` (for windows) or `cmd+shift+p`(for mac) and select `Dev Containers: Build and Open in container`. This will create the container and install the requirements.
 

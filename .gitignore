@@ -10,6 +10,8 @@ MUJOCO_LOG.TXT
 # DrawIo
 *.bkp
 ariel_header.svg
+# Docs
+docs/apidocs/
 ### PYTHON ######################################################################
 # Byte-compiled / optimized / DLL files
 __pycache__/
