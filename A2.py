@@ -58,6 +58,20 @@ def compute_displacement(history_xy, forward_xy0, mode="projected"):
         return float(np.linalg.norm(disp))
     else:
         raise ValueError(f"Unknown mode: {mode}")
+    
+def compute_forward_minus_sideways(history_xy, forward_xy0, k=0.5):
+    """
+    EA2B fitness: forward progress minus k * sideways drift.
+    k∈[0.3, 0.7] is sensible; start with 0.5.
+    """
+    start = np.asarray(history_xy[0], dtype=float)
+    end   = np.asarray(history_xy[-1], dtype=float)
+    disp  = end - start
+    forward  = float(np.dot(disp, forward_xy0))           # forward component
+    eucl     = float(np.linalg.norm(disp))                 # total displacement
+    sideways = max(0.0, eucl - abs(forward))               # non-forward component
+    return forward - k * sideways
+
 
 # ----------------------------
 # Helpers for robust body binding & facing
@@ -227,7 +241,7 @@ LOW_O, HI_O = -HINGE_LIMIT, HINGE_LIMIT
 LOW_BOUNDS = np.array([LOW_A, LOW_F, LOW_P, LOW_O] * NU, dtype=float)
 HI_BOUNDS  = np.array([HI_A, HI_F, HI_P, HI_O] * NU, dtype=float)
 
-def run_episode_with_genome(genes, steps=STEPS):
+def run_episode_with_genome(genes, steps=STEPS,fitness_variant="EA1", k_side=0.5):
     """One episode with oscillator parameters; fitness = unified displacement metric (with rate limiting)."""
     mujoco.set_mjcb_control(None)
 
@@ -269,7 +283,14 @@ def run_episode_with_genome(genes, steps=STEPS):
         mujoco.mj_step(model, data)
         history.append(core_body.xpos[:2].copy())
 
-    fit = compute_displacement(history, forward_xy0, mode=FITNESS_MODE)
+    #fit = compute_displacement(history, forward_xy0, mode=FITNESS_MODE)
+    #return fit
+    if fitness_variant == "EA1":
+        fit = compute_displacement(history, forward_xy0, mode="projected")
+    elif fitness_variant == "EA2B":
+        fit = compute_forward_minus_sideways(history, forward_xy0, k=k_side)
+    else:
+        raise ValueError(f"Unknown fitness_variant: {fitness_variant}")
     return fit
 
 # ----------------------------
@@ -287,17 +308,25 @@ except AttributeError:
 
 toolbox = base.Toolbox()
 
+def make_evaluator(steps=STEPS, fitness_variant="EA1", k_side=0.5):
+    def _eval(ind):
+        val = run_episode_with_genome(
+            ind, steps=steps, fitness_variant=fitness_variant, k_side=k_side
+        )
+        return (val,)
+    return _eval
+
 def init_ind():
     return creator.Individual(np.random.uniform(LOW_BOUNDS, HI_BOUNDS).tolist())
 
 toolbox.register("individual", init_ind)
 toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
-def evaluate(ind):
-    dx = run_episode_with_genome(ind, steps=STEPS)
-    return (dx,)
+#def evaluate(ind):
+ #   dx = run_episode_with_genome(ind, steps=STEPS)
+  #  return (dx,)
 
-toolbox.register("evaluate", evaluate)
+#toolbox.register("evaluate", evaluate)
 ETA = 20.0
 low_list = LOW_BOUNDS.tolist()
 up_list  = HI_BOUNDS.tolist()
@@ -354,7 +383,12 @@ def run_random_experiment(num_runs=100, steps=500, out_png=RAND_LINE_PNG):
     print(f"[Random] Saved line chart to {out_png}")
     return fitnesses
 
-def run_ea_experiment(pop_size=100, n_gen=100, cxpb=0.9, mutpb=0.2, steps=STEPS, out_png=EA_FITNESS_PNG):
+def run_ea_experiment(pop_size=100, n_gen=100, cxpb=0.9, mutpb=0.2, steps=STEPS, out_png=EA_FITNESS_PNG, fitness_variant="EA1", k_side=0.5):
+    toolbox.register("evaluate", make_evaluator(
+    steps=steps,
+    fitness_variant=fitness_variant,
+    k_side=k_side
+    ))
     # init population
     pop = toolbox.population(n=pop_size)
 
@@ -426,11 +460,51 @@ def run_ea_experiment(pop_size=100, n_gen=100, cxpb=0.9, mutpb=0.2, steps=STEPS,
 # Main
 # ----------------------------
 def main():
+    random.seed(42)
+    np.random.seed(42)
     # 1) Random experiment
     NUM_RANDOM_RUNS = 100
     run_random_experiment(num_runs=NUM_RANDOM_RUNS, steps=STEPS, out_png=RAND_LINE_PNG)
 
-    # 2) EA experiment
+        # 2) EA experiments: EA1 (distance) vs EA2B (distance - k*sideways)
+    POP_SIZE = 60
+    NGEN = 30
+    CXPB = 0.9
+    MUTPB = 0.2
+    STEPS_EA = 2000  # quicker for testing; raise to STEPS later
+
+    # EA1: projected forward distance
+    best1, curve1 = run_ea_experiment(
+        pop_size=POP_SIZE, n_gen=NGEN, cxpb=CXPB, mutpb=MUTPB,
+        steps=STEPS_EA, out_png="ea1_best_over_generations.png",
+        fitness_variant="EA1"
+    )
+
+    # EA2B: forward - 0.5 * sideways
+    best2, curve2 = run_ea_experiment(
+        pop_size=POP_SIZE, n_gen=NGEN, cxpb=CXPB, mutpb=MUTPB,
+        steps=STEPS_EA, out_png="ea2b_best_over_generations.png",
+        fitness_variant="EA2B", k_side=0.5
+    )
+
+    # 3) Compare curves on one figure
+    plt.figure(figsize=(8,4))
+    plt.plot(curve1, label="EA1: forward distance")
+    plt.plot(curve2, label="EA2B: forward - 0.5×sideways")
+    plt.xlabel("Generation")
+    plt.ylabel("Fitness (m)")
+    plt.title("EA comparison (same env & controller, different fitness)")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig("ea_comparison.png", dpi=150)
+    plt.close()
+
+    # 4) Render the best of EA2B (straighter gait, better for demo)
+    print("[Render] Rendering EA2B best individual (real-time)...")
+    render_episode_with_genome_realtime(best2, duration_sec=None)
+'''
+   # 2) EA experiment
     POP_SIZE = 100
     NGEN = 100
     CXPB = 0.9
@@ -450,6 +524,6 @@ def main():
     # If you prefer exact replay instead:
     # print("[Render] Rendering final best individual (exact replay)...")
     # render_episode_with_genome_exact(best_ind, steps=STEPS)
-
+'''
 if __name__ == "__main__":
     main()
