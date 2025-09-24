@@ -5,18 +5,21 @@ Key changes:
 - **Do NOT change the fitness** (compute_displacement stays identical).
 - Stronger exploration towards **larger joint amplitudes** while keeping frequencies in a non-twitchy band.
 - Bias the **initialization** toward higher amplitudes and small offsets.
-- **Heavy‑tailed amplitude kicks** during mutation to escape low‑amplitude traps.
+- **Heavy-tailed amplitude kicks** during mutation to escape low-amplitude traps.
 - Add **elitism**, **random immigrants**, and **adaptive mutation** on stagnation.
-- Gentle **amplitude warm‑up** in simulation so large A doesn’t cause instability, and a slightly higher rate limit to avoid over‑damping.
+- Gentle **amplitude warm-up** in simulation so large A doesn’t cause instability, and a slightly higher rate limit to avoid over-damping.
 - Extra logging of amplitude stats.
-
-The overall structure/order of the original script is preserved (random → EA → plots → render).
+- EA1 projected-distance comparison metric tracked for all EA runs.
+- Runs each algorithm 3 times and saves **all** run data to CSV.
+- FINAL: Everything runs for **30 generations/episodes** (EA gens == Random episodes).
 """
 
 import math
 import numpy as np
 import random
 import time
+import csv
+import os
 import mujoco
 import matplotlib.pyplot as plt
 from collections import defaultdict
@@ -35,12 +38,12 @@ HINGE_LIMIT = math.pi / 2
 DT = 1 / 240
 STEPS = 4000
 
-# Output files
+# Output files (base names; per-run suffixes will be added)
 RAND_LINE_PNG = "random_fitness_line.png"
 EA_FITNESS_PNG = "ea_best_over_generations.png"
 
 # Rate limiter (per-step max change, radians)
-# (Slightly higher so high‑A solutions can actually manifest in sim)
+# (Slightly higher so high-A solutions can actually manifest in sim)
 RATE_LIMIT_DU = 0.025  # was 0.015
 
 # Smoothly ramp amplitude during the first WARMUP_STEPS to avoid shocks
@@ -127,18 +130,14 @@ def random_move(data, rng):
 
 def run_random_episode(rng, steps, fitness_variant="EA1", k_side=0.5):
     """One episode with random control, fitness = unified displacement metric."""
-
     model, data = build_model()
     core_body, forward_xy0 = _bind_core_body_and_forward_xy(model, data)
-
-    history = [core_body.xpos[:2].copy()]  # log initial position BEFORE stepping
+    history = [core_body.xpos[:2].copy()]
     for _ in range(steps):
         u = random_move(data, rng)
         data.ctrl[:] = u
         mujoco.mj_step(model, data)
         history.append(core_body.xpos[:2].copy())
-
-    # Unified metric
     fit = compute_displacement(history, forward_xy0, mode=fitness_variant, k=k_side)
     return fit
 
@@ -154,14 +153,8 @@ def split_genes(genes, model):
 # ----------------------------
 
 def render_episode_with_genome_exact(genes, steps=STEPS):
-    """
-    Replay exactly what EA evaluated (same t*DT timing), and keep the window open
-    until the user closes it.
-    """
-
     model, data = build_model()
     A, F, PHASE, OFFSET = split_genes(genes, model)
-
     with viewer.launch_passive(model, data) as v:
         for t in range(steps):
             if not v.is_running():
@@ -177,11 +170,8 @@ def render_episode_with_genome_exact(genes, steps=STEPS):
 
 
 def render_episode_with_genome_realtime(genes, duration_sec=None):
-    """Real-time viewer using data.time pacing; runs until closed (or duration)."""
-
     model, data = build_model()
     A, F, PHASE, OFFSET = split_genes(genes, model)
-
     with viewer.launch_passive(model, data) as v:
         t0_wall = time.perf_counter()
         while v.is_running():
@@ -201,7 +191,6 @@ def render_episode_with_genome_realtime(genes, duration_sec=None):
 # ----------------------------
 
 def build_model(spawn_pos=(0, 0, 0.1)):
-
     mujoco.set_mjcb_control(None)
     world = SimpleFlatWorld()
     g = gecko()
@@ -231,25 +220,19 @@ HI_BOUNDS  = np.array([HI_A, HI_F, HI_P, HI_O] * NU, dtype=float)
 
 def run_episode_with_genome(genes, steps=STEPS, fitness_variant="EA1", k_side=0.5):
     """One episode with oscillator parameters; fitness = unified displacement metric (with rate limiting + warm-up)."""
-
     model, data = build_model()
     core_body, forward_xy0 = _bind_core_body_and_forward_xy(model, data)
     A, F, PHASE, OFFSET = split_genes(genes, model)
 
-    history = [core_body.xpos[:2].copy()]  # log initial pose BEFORE stepping
-
-    # Rate-limited control application
+    history = [core_body.xpos[:2].copy()]
     u_apply = data.ctrl.copy()
 
     for t in range(steps):
         t_sec = t * DT
-        # Amplitude warm-up to let large-A solutions settle
         ramp = min(1.0, t / max(1, WARMUP_STEPS))
-        # Desired command from oscillator
         u_cmd = OFFSET + (A * ramp) * np.sin(2.0 * math.pi * F * t_sec + PHASE)
         u_cmd = np.clip(u_cmd, -HINGE_LIMIT, HINGE_LIMIT)
 
-        # Per-step rate limiting
         du = u_cmd - u_apply
         du = np.clip(du, -RATE_LIMIT_DU, RATE_LIMIT_DU)
         u_apply = np.clip(u_apply + du, -HINGE_LIMIT, HINGE_LIMIT)
@@ -264,7 +247,6 @@ def run_episode_with_genome(genes, steps=STEPS, fitness_variant="EA1", k_side=0.
 # ----------------------------
 # DEAP scaffolding
 # ----------------------------
-# Guarded creation to avoid re-definition errors in interactive runs
 try:
     creator.FitnessMax
 except AttributeError:
@@ -290,7 +272,7 @@ def make_evaluator(steps=STEPS, fitness_variant="EA1", k_side=0.5):
 def init_ind():
     genes = np.empty(GENOME_SIZE, dtype=float)
     for j in range(NU):
-        # High‑amplitude bias via Beta(5,2) ∈ [0,1]
+        # High-amplitude bias via Beta(5,2) ∈ [0,1]
         a = float(np.clip(np.random.beta(5.0, 2.0) * HI_A, LOW_A, HI_A))
         # Keep frequencies in comfortable range (still within bounds)
         f = float(np.clip(np.random.uniform(0.6, 1.8), LOW_F, HI_F))
@@ -308,10 +290,7 @@ ETA = 20.0
 low_list = LOW_BOUNDS.tolist()
 up_list  = HI_BOUNDS.tolist()
 
-# Tournament selection stays the same
 toolbox.register("select", tools.selTournament, tournsize=3)
-
-# Baseline SBX crossover (bounded)
 toolbox.register(
     "mate",
     tools.cxSimulatedBinaryBounded,
@@ -319,31 +298,24 @@ toolbox.register(
     up=up_list,
     eta=ETA,
 )
-
-# We'll keep DEAP's polynomial mutation as a base and add amplitude "kicks" below
 _base_mut = tools.mutPolynomialBounded
 
 
 def _amplitude_kick(ind, frac_joints=0.3, scale=0.25):
-    """Heavy‑tailed kicks on A genes for a random subset of joints.
-    scale is relative to HI_A.
-    """
+    """Heavy-tailed kicks on A genes for a random subset of joints."""
     n_pick = max(1, int(frac_joints * NU))
     idx_A = [4*j for j in range(NU)]
     pick = random.sample(idx_A, n_pick)
     for i in pick:
-        # Cauchy step (heavy‑tailed) encourages occasional big jumps
+        # Cauchy step (heavy-tailed) encourages occasional big jumps
         cauchy = math.tan(math.pi * (random.random() - 0.5))
         step = cauchy * (scale * HI_A)
         newA = float(np.clip(ind[i] + step, LOW_A, HI_A))
-        # If amplitude stayed too small, bias upward a bit
         if newA < 0.4 * HI_A:
             newA = min(HI_A, newA + 0.3 * HI_A)
         ind[i] = newA
 
 
-# Wrapper mutate used by our EA loop
-# (keeps same signature usage as before)
 def mutate(offspring, mutpb, amp_kick_prob=0.5):
     for m in offspring:
         changed = False
@@ -360,11 +332,27 @@ def mutate(offspring, mutpb, amp_kick_prob=0.5):
 
 
 # ----------------------------
+# CSV helpers
+# ----------------------------
+def ensure_dir(path):
+    d = os.path.dirname(path)
+    if d and not os.path.exists(d):
+        os.makedirs(d, exist_ok=True)
+
+def write_csv(path, rows, header):
+    ensure_dir(path)
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=header)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+
+# ----------------------------
 # Experiment runners
 # ----------------------------
 
-def run_random_experiment(num_runs=100, steps=500, out_png=RAND_LINE_PNG, fitness_variant="EA1", k_side=0.5):
-    rng = np.random.default_rng(42)
+def run_random_experiment(num_runs=100, steps=500, out_png=RAND_LINE_PNG, fitness_variant="EA1", k_side=0.5, seed=None, csv_path=None, run_idx=None):
+    rng = np.random.default_rng(seed)
     fitnesses = []
     for i in range(num_runs):
         fit = run_random_episode(rng, steps=steps, fitness_variant=fitness_variant, k_side=k_side)
@@ -373,21 +361,37 @@ def run_random_experiment(num_runs=100, steps=500, out_png=RAND_LINE_PNG, fitnes
 
     fitnesses = np.asarray(fitnesses, dtype=float)
 
-    # Plot as line chart (run index vs fitness)
+    # Plot
     plt.figure(figsize=(8, 4))
     plt.plot(fitnesses, marker="o", linestyle="-", label="Random run fitness")
     plt.axhline(np.mean(fitnesses), linestyle="--", linewidth=1, label=f"Mean = {np.mean(fitnesses):.3f}")
     plt.axhline(np.median(fitnesses), linestyle=":", linewidth=1, label=f"Median = {np.median(fitnesses):.3f}")
-    plt.xlabel("Run index")
+    plt.xlabel("Episode index")
     plt.ylabel(f"Fitness ({fitness_variant}, m)")
-    plt.title(f"Random Controller Fitness over {num_runs} Runs (steps={steps})")
+    plt.title(f"Random Controller Fitness over {num_runs} Episodes (steps={steps})")
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(out_png, dpi=150)
     plt.close()
-
     print(f"[Random] Saved line chart to {out_png}")
+
+    # CSV (per episode)
+    if csv_path is not None:
+        rows = []
+        for i, fval in enumerate(fitnesses.tolist()):
+            rows.append({
+                "algorithm": "Random",
+                "outer_run": run_idx,
+                "episode_index": i,
+                "fitness_variant": fitness_variant,
+                "fitness": fval,
+                "steps": steps,
+                "seed": seed,
+            })
+        header = ["algorithm","outer_run","episode_index","fitness_variant","fitness","steps","seed"]
+        write_csv(csv_path, rows, header)
+
     return fitnesses
 
 
@@ -402,14 +406,13 @@ def crossover(offspring, cxpb):
     return offspring
 
 
-# Improved EA: elitism + random immigrants + adaptive mutation on stagnation
 def run_ea_experiment(pop_size=100, n_gen=100, cxpb=0.9, mutpb=0.2, steps=STEPS, out_png=EA_FITNESS_PNG, fitness_variant="EA1", k_side=0.5):
+    """Runs EA and returns best individual, per-gen native fitness, per-gen EA1 projected distance."""
     toolbox.register("evaluate", make_evaluator(
         steps=steps,
         fitness_variant=fitness_variant,
         k_side=k_side
     ))
-    # initial population
     pop = toolbox.population(n=pop_size)
 
     # evaluate initial population
@@ -417,82 +420,80 @@ def run_ea_experiment(pop_size=100, n_gen=100, cxpb=0.9, mutpb=0.2, steps=STEPS,
     for ind in invalid:
         ind.fitness.values = toolbox.evaluate(ind)
 
-    # Elitism via Hall of Fame
-    ELITE_K = max(1, pop_size // 20)  # top 5%
+    ELITE_K = max(1, pop_size // 20)
     hof = tools.HallOfFame(ELITE_K)
     hof.update(pop)
 
     best_per_gen = [tools.selBest(pop, 1)[0].fitness.values[0]]
 
-    # Stagnation tracking
+    # EA1 comparison metric tracking
+    best_proj_per_gen = []
+    best_initial = tools.selBest(pop, 1)[0]
+    best_initial_proj = run_episode_with_genome(
+        best_initial, steps=steps, fitness_variant="EA1", k_side=k_side
+    )
+    best_proj_per_gen.append(best_initial_proj)
+
     no_improve = 0
     best_so_far = best_per_gen[-1]
-
-    # Random immigrants fraction
     IMM_FRAC = 0.10
 
     for gen in range(1, n_gen + 1):
         offspring = toolbox.select(pop, len(pop))
         offspring = list(map(toolbox.clone, offspring))
-
-        # crossover & mutation
         offspring = crossover(offspring, cxpb)
 
-        # Adapt mutation if stagnating
         adapt_mutpb = mutpb
         amp_kick_prob = 0.5
         if no_improve >= 5:
             adapt_mutpb = min(1.0, mutpb * 1.8)
-            amp_kick_prob = 0.6  # push harder on amplitude exploration
+            amp_kick_prob = 0.6
         if no_improve >= 10:
             adapt_mutpb = min(1.0, mutpb * 2.5)
             amp_kick_prob = 0.8
 
         offspring = mutate(offspring, adapt_mutpb, amp_kick_prob=amp_kick_prob)
 
-        # Random immigrants replace a fraction before evaluation
         n_imm = max(0, int(IMM_FRAC * len(offspring)))
         for _ in range(n_imm):
             idx = random.randrange(len(offspring))
             offspring[idx] = toolbox.individual()
 
-        # evaluate new/changed individuals
         invalid = [ind for ind in offspring if not ind.fitness.valid]
         for ind in invalid:
             ind.fitness.values = toolbox.evaluate(ind)
 
-        # Elitism: keep top ELITE_K from previous pop (tracked by HOF)
         hof.update(offspring)
         elites = list(map(toolbox.clone, hof.items))
 
-        # replace population (elitism injected)
-        # Keep the best ELITE_K overall, fill the rest with offspring
         offspring.sort(key=lambda ind: ind.fitness.values[0], reverse=True)
         pop = elites + offspring[: max(0, pop_size - len(elites))]
 
-        # record best of this generation
-        best = tools.selBest(pop, 1)[0].fitness.values[0]
-        best_per_gen.append(best)
+        best = tools.selBest(pop, 1)[0]
+        best_per_gen.append(best.fitness.values[0])
 
-        # stagnation update
-        if best > best_so_far + 1e-9:
-            best_so_far = best
+        best_proj = run_episode_with_genome(
+            best, steps=steps, fitness_variant="EA1", k_side=k_side
+        )
+        best_proj_per_gen.append(best_proj)
+
+        if best.fitness.values[0] > best_so_far + 1e-9:
+            best_so_far = best.fitness.values[0]
             no_improve = 0
         else:
             no_improve += 1
 
-        # Logging
         Fs = np.array([ind[1::4] for ind in pop], dtype=float).ravel()
         As = np.array([ind[0::4] for ind in pop], dtype=float).ravel()
         bigA = (As > 0.7 * HI_A).mean() * 100.0
-        if gen % 1 == 0:
-            print(
-                f"[EA] Gen {gen:3d} | best = {best:.4f} | no_improve={no_improve:2d} | "
-                f"F mean {Fs.mean():.2f} Hz (min {Fs.min():.2f}, max {Fs.max():.2f}) | "
-                f"A mean {As.mean():.2f} rad | >0.6*HI {bigA:4.1f}%"
-            )
+        print(
+            f"[EA] Gen {gen:3d} | best = {best.fitness.values[0]:.4f} | no_improve={no_improve:2d} | "
+            f"F mean {Fs.mean():.2f} Hz (min {Fs.min():.2f}, max {Fs.max():.2f}) | "
+            f"A mean {As.mean():.2f} rad | >0.6*HI {bigA:4.1f}% | "
+            f"EA1-proj(best) = {best_proj:.4f}"
+        )
 
-    # Plot best fitness by generation
+    # Native fitness plot
     plt.figure(figsize=(8, 4))
     plt.plot(best_per_gen, marker="o")
     plt.xlabel("Generation")
@@ -502,99 +503,159 @@ def run_ea_experiment(pop_size=100, n_gen=100, cxpb=0.9, mutpb=0.2, steps=STEPS,
     plt.tight_layout()
     plt.savefig(out_png, dpi=150)
     plt.close()
-
     print(f"[EA] Saved best-per-generation plot to {out_png}")
 
-    best_ind = tools.selBest(pop, 1)[0]
-    return best_ind, best_per_gen
+    # EA1 comparison plot
+    proj_png = out_png.replace(".png", "_projected_distance.png")
+    plt.figure(figsize=(8, 4))
+    plt.plot(best_proj_per_gen, marker="o")
+    plt.xlabel("Generation")
+    plt.ylabel("Projected Distance (EA1, m)")
+    plt.title(f"EA Comparison Metric: EA1 Projected Distance per Generation\n(pop={pop_size}, steps={steps})")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(proj_png, dpi=150)
+    plt.close()
+    print(f"[EA] Saved EA1 projected-distance comparison plot to {proj_png}")
 
+    best_ind = tools.selBest(pop, 1)[0]
+    return best_ind, best_per_gen, best_proj_per_gen
 
 
 def get_z_scores(results, eps=1e-12):
     out = defaultdict(dict)
-
     for mode, d in results.items():
-
         rand = np.asarray(d.get("Random_experiment_fitnesses", []), dtype=float)
         ea   = np.asarray(d.get("EA_experiment_fitness", []), dtype=float)
         rand = rand[~np.isnan(rand)]
         ea   = ea[~np.isnan(ea)]
-
         mu = float(rand.mean()) if rand.size else float("nan")
         sd = float(rand.std())  if rand.size else float("nan")
-
-        # minimal error management
         if sd == 0:
             sd = eps
-        # Z scores
         if rand.size == 0 or np.isnan(sd):
             z = []
         else:
             z = ((ea - mu) / sd).astype(float).tolist()
-
         out[mode]["random_mean"] = mu
         out[mode]["random_std"] = sd
         out[mode]["ea_z_scores"] = z
-
     return out
 
 # ----------------------------
-# Main
+# Main: run each algorithm 3 times, NGEN=30 (random episodes = 30), and save CSVs
 # ----------------------------
 
 def main():
-    random.seed(42)
-    np.random.seed(42)
-    results = defaultdict(dict)
-    # 1) Random experiment
-    NUM_RANDOM_RUNS = 20
-    Fits_EA1_rand = run_random_experiment(num_runs=NUM_RANDOM_RUNS, steps=STEPS, out_png=RAND_LINE_PNG, fitness_variant="EA1")
-    Fits_EA2B_rand = run_random_experiment(num_runs=NUM_RANDOM_RUNS, steps=STEPS, out_png=RAND_LINE_PNG, fitness_variant="EA2B", k_side=0.5)
-
-    # 2) EA experiments: EA1 (distance) vs EA2B (distance - k*sideways)
+    # Global experiment parameters
     POP_SIZE = 120
-    NGEN = 20
+    NGEN = 30            # <-- FINAL: 30 generations
     CXPB = 0.9
     MUTPB = 0.25
-    STEPS_EA = 4000  # quicker for testing; raise to STEPS later
+    STEPS_EA = 4000
 
-    # EA1: projected forward distance
-    best1, Fits_EA1 = run_ea_experiment(
-        pop_size=POP_SIZE, n_gen=NGEN, cxpb=CXPB, mutpb=MUTPB,
-        steps=STEPS_EA, out_png="ea1_best_over_generations.png",
-        fitness_variant="EA1"
-    )
+    # Random baseline episodes set equal to generations
+    NUM_RANDOM_RUNS_PER_EXP = NGEN
 
-    # EA2B: forward - 0.5 * sideways
-    best2, Fits_EA2B = run_ea_experiment(
-        pop_size=POP_SIZE, n_gen=NGEN, cxpb=CXPB, mutpb=MUTPB,
-        steps=STEPS_EA, out_png="ea2b_best_over_generations.png",
-        fitness_variant="EA2B", k_side=0.5
-    )
-    results["EA1"] = {"EA_experiment_fitness":Fits_EA1, "Random_experiment_fitnesses":Fits_EA1_rand}
-    results["EA2B"] = {"EA_experiment_fitness":Fits_EA2B, "Random_experiment_fitnesses":Fits_EA2B_rand}
-    Z_results = get_z_scores(results)
+    # Output directories (optional: keep root clean)
+    out_dir = "results"
+    ensure_dir(os.path.join(out_dir, "dummy"))
+    # Master CSV to aggregate all EA runs
+    ea_master_rows = []
+    ea_master_header = [
+        "algorithm","outer_run","generation","native_fitness","projected_fitness",
+        "pop_size","n_gen","steps","cxpb","mutpb","seed"
+    ]
 
-    plt.figure(figsize=(8, 4))
-    for model, stats in Z_results.items():
-        z = stats["ea_z_scores"]
-        x = np.arange(len(z))
-        legend_label = f"{model} z_scores"
-        plt.plot(x, z, marker="o", linestyle="-", label=legend_label)
+    total_runs = 3
+    base_seed = 42
+    best_ea2b_last = None
 
-    plt.axhline(0.0, linestyle="--", linewidth=1, label="Z = 0")
-    plt.xlabel("N Gen")
-    plt.ylabel("Z score")
-    plt.title("Z-scores per Model Across generations")
-    plt.legend(fontsize=8)
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig("Z_scores_comparison_n1_20_gen", dpi=150)
-    plt.close()
+    for run_idx in range(1, total_runs + 1):
+        seed = base_seed + 100 * run_idx
+        print(f"\n================ RUN {run_idx} / {total_runs} (seed {seed}) ================")
+        random.seed(seed)
+        np.random.seed(seed)
 
-    # 4) Render the best of EA2B (straighter gait, better for demo)
-    print("[Render] Rendering EA2B best individual (real-time)...")
-    render_episode_with_genome_realtime(best2, duration_sec=None)
+        # ---- Random controller baseline (EA1 metric) ----
+        rand_png = os.path.join(out_dir, f"{RAND_LINE_PNG.replace('.png','')}_run{run_idx}.png")
+        rand_csv = os.path.join(out_dir, f"random_baseline_run{run_idx}.csv")
+        _ = run_random_experiment(
+            num_runs=NUM_RANDOM_RUNS_PER_EXP,
+            steps=STEPS,
+            out_png=rand_png,
+            fitness_variant="EA1",
+            k_side=0.5,
+            seed=seed,
+            csv_path=rand_csv,
+            run_idx=run_idx
+        )
+
+        # ---- EA1 ----
+        ea1_png = os.path.join(out_dir, f"ea1_best_over_generations_run{run_idx}.png")
+        best1, ea1_native, ea1_proj = run_ea_experiment(
+            pop_size=POP_SIZE, n_gen=NGEN, cxpb=CXPB, mutpb=MUTPB,
+            steps=STEPS_EA, out_png=ea1_png,
+            fitness_variant="EA1"
+        )
+        # Save per-run EA1 CSV
+        rows = []
+        for gen, (nf, pf) in enumerate(zip(ea1_native, ea1_proj)):  # includes generation 0
+            rows.append({
+                "algorithm": "EA1",
+                "outer_run": run_idx,
+                "generation": gen,
+                "native_fitness": nf,
+                "projected_fitness": pf,
+                "pop_size": POP_SIZE,
+                "n_gen": NGEN,
+                "steps": STEPS_EA,
+                "cxpb": CXPB,
+                "mutpb": MUTPB,
+                "seed": seed
+            })
+        ea1_csv = os.path.join(out_dir, f"ea1_run{run_idx}.csv")
+        write_csv(ea1_csv, rows, ea_master_header)
+        ea_master_rows.extend(rows)
+
+        # ---- EA2B ----
+        ea2b_png = os.path.join(out_dir, f"ea2b_best_over_generations_run{run_idx}.png")
+        best2, ea2b_native, ea2b_proj = run_ea_experiment(
+            pop_size=POP_SIZE, n_gen=NGEN, cxpb=CXPB, mutpb=MUTPB,
+            steps=STEPS_EA, out_png=ea2b_png,
+            fitness_variant="EA2B", k_side=0.5
+        )
+        # Save per-run EA2B CSV
+        rows = []
+        for gen, (nf, pf) in enumerate(zip(ea2b_native, ea2b_proj)):
+            rows.append({
+                "algorithm": "EA2B",
+                "outer_run": run_idx,
+                "generation": gen,
+                "native_fitness": nf,
+                "projected_fitness": pf,
+                "pop_size": POP_SIZE,
+                "n_gen": NGEN,
+                "steps": STEPS_EA,
+                "cxpb": CXPB,
+                "mutpb": MUTPB,
+                "seed": seed
+            })
+        ea2b_csv = os.path.join(out_dir, f"ea2b_run{run_idx}.csv")
+        write_csv(ea2b_csv, rows, ea_master_header)
+        ea_master_rows.extend(rows)
+
+        #best_ea2b_last = best2
+
+    # Write combined EA master CSV (all runs, both algorithms)
+    ea_master_csv = os.path.join(out_dir, "ea_all_runs_master.csv")
+    write_csv(ea_master_csv, ea_master_rows, ea_master_header)
+    print(f"[CSV] Wrote EA master CSV: {ea_master_csv}")
+
+    # Optional: render the best of the last EA2B run (demo)
+    #if best_ea2b_last is not None:
+     #   print("[Render] Rendering EA2B best individual from last run (real-time)...")
+    #    render_episode_with_genome_realtime(best_ea2b_last, duration_sec=None)
 
 
 if __name__ == "__main__":
