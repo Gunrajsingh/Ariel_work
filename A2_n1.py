@@ -1,11 +1,16 @@
 """
-Assignment 2 — Gecko robot
-1) Runs random controller N times, collects fitness, plots distribution.
-2) Evolves oscillator controller with DEAP, plots best-per-generation curve.
-3) Renders the best EA individual in a Mujoco viewer.
+Assignment 2 — Gecko robot (improved EA & exploration)
 
-The fitness/comparison metric is unified via `compute_displacement` and, by default,
-is the robot's forward displacement projected onto its initial facing direction.
+Key changes:
+- **Do NOT change the fitness** (compute_displacement stays identical).
+- Stronger exploration towards **larger joint amplitudes** while keeping frequencies in a non-twitchy band.
+- Bias the **initialization** toward higher amplitudes and small offsets.
+- **Heavy‑tailed amplitude kicks** during mutation to escape low‑amplitude traps.
+- Add **elitism**, **random immigrants**, and **adaptive mutation** on stagnation.
+- Gentle **amplitude warm‑up** in simulation so large A doesn’t cause instability, and a slightly higher rate limit to avoid over‑damping.
+- Extra logging of amplitude stats.
+
+The overall structure/order of the original script is preserved (random → EA → plots → render).
 """
 
 import math
@@ -35,7 +40,11 @@ RAND_LINE_PNG = "random_fitness_line.png"
 EA_FITNESS_PNG = "ea_best_over_generations.png"
 
 # Rate limiter (per-step max change, radians)
-RATE_LIMIT_DU = 0.015  # tune 0.01–0.03 as needed
+# (Slightly higher so high‑A solutions can actually manifest in sim)
+RATE_LIMIT_DU = 0.025  # was 0.015
+
+# Smoothly ramp amplitude during the first WARMUP_STEPS to avoid shocks
+WARMUP_STEPS = int(0.5 / DT)  # ~0.5 s
 
 # ----------------------------
 # Unified fitness/comparison metric
@@ -44,7 +53,7 @@ def compute_displacement(history_xy, forward_xy0, mode="EA1", k=0.5):
     """
     history_xy: list/array of XY positions (start..end)
     forward_xy0: unit XY vector of initial facing (ignored if mode != 'projected')
-    mode: EA1 ='projected'; EA2B" = orward_minus_sideways
+    mode: EA1 ='projected'; EA2B = forward_minus_sideways
     returns scalar fitness in meters
     """
     disp = np.asarray(history_xy[-1]) - np.asarray(history_xy[0])
@@ -52,16 +61,17 @@ def compute_displacement(history_xy, forward_xy0, mode="EA1", k=0.5):
         # Original projected mode
         return float(np.dot(disp, forward_xy0))
     elif mode == "EA2B":
-        # compute_forward_minus_sideways 
+        # compute_forward_minus_sideways
         start = np.asarray(history_xy[0], dtype=float)
         end   = np.asarray(history_xy[-1], dtype=float)
         disp  = end - start
-        forward  = float(np.dot(disp, forward_xy0)) # forward component
-        eucl     = float(np.linalg.norm(disp)) # total displacement
-        sideways = max(0.0, eucl - abs(forward)) # non-forward component
+        forward  = float(np.dot(disp, forward_xy0))  # forward component
+        eucl     = float(np.linalg.norm(disp))       # total displacement
+        sideways = max(0.0, eucl - abs(forward))     # non-forward component
         return forward - k * sideways
     else:
         raise ValueError(f"Unknown mode: {mode}")
+
 
 # ----------------------------
 # Helpers for robust body binding & facing
@@ -114,6 +124,7 @@ def random_move(data, rng):
     u = np.clip(u, -HINGE_LIMIT, HINGE_LIMIT)
     return u
 
+
 def run_random_episode(rng, steps, fitness_variant="EA1", k_side=0.5):
     """One episode with random control, fitness = unified displacement metric."""
 
@@ -131,15 +142,17 @@ def run_random_episode(rng, steps, fitness_variant="EA1", k_side=0.5):
     fit = compute_displacement(history, forward_xy0, mode=fitness_variant, k=k_side)
     return fit
 
+
 def split_genes(genes, model):
     genes = np.asarray(genes, dtype=float)
     A, F, PHASE, OFFSET = genes[0::4], genes[1::4], genes[2::4], genes[3::4]
     assert len(A) == model.nu, "Genome size does not match actuator count."
     return A, F, PHASE, OFFSET
-    
+
 # ----------------------------
 # Rendering helpers
 # ----------------------------
+
 def render_episode_with_genome_exact(genes, steps=STEPS):
     """
     Replay exactly what EA evaluated (same t*DT timing), and keep the window open
@@ -154,12 +167,14 @@ def render_episode_with_genome_exact(genes, steps=STEPS):
             if not v.is_running():
                 return
             t_sec = t * DT
-            u_cmd = OFFSET + A * np.sin(2.0 * math.pi * F * t_sec + PHASE)
+            ramp = min(1.0, t / max(1, WARMUP_STEPS))
+            u_cmd = OFFSET + (A * ramp) * np.sin(2.0 * math.pi * F * t_sec + PHASE)
             data.ctrl[:] = np.clip(u_cmd, -HINGE_LIMIT, HINGE_LIMIT)
             mujoco.mj_step(model, data)
             v.sync()
         while v.is_running():
             v.sync()
+
 
 def render_episode_with_genome_realtime(genes, duration_sec=None):
     """Real-time viewer using data.time pacing; runs until closed (or duration)."""
@@ -175,7 +190,8 @@ def render_episode_with_genome_realtime(genes, duration_sec=None):
             target = time.perf_counter() - t0_wall
             while data.time < target and v.is_running():
                 t_sim = data.time
-                u_cmd = OFFSET + A * np.sin(2.0 * math.pi * F * t_sim + PHASE)
+                ramp = min(1.0, (t_sim / DT) / max(1, WARMUP_STEPS))
+                u_cmd = OFFSET + (A * ramp) * np.sin(2.0 * math.pi * F * t_sim + PHASE)
                 data.ctrl[:] = np.clip(u_cmd, -HINGE_LIMIT, HINGE_LIMIT)
                 mujoco.mj_step(model, data)
             v.sync()
@@ -183,6 +199,7 @@ def render_episode_with_genome_realtime(genes, duration_sec=None):
 # ----------------------------
 # EA evaluation
 # ----------------------------
+
 def build_model(spawn_pos=(0, 0, 0.1)):
 
     mujoco.set_mjcb_control(None)
@@ -211,8 +228,9 @@ LOW_O, HI_O = -HINGE_LIMIT, HINGE_LIMIT
 LOW_BOUNDS = np.array([LOW_A, LOW_F, LOW_P, LOW_O] * NU, dtype=float)
 HI_BOUNDS  = np.array([HI_A, HI_F, HI_P, HI_O] * NU, dtype=float)
 
-def run_episode_with_genome(genes, steps=STEPS,fitness_variant="EA1", k_side=0.5):
-    """One episode with oscillator parameters; fitness = unified displacement metric (with rate limiting)."""
+
+def run_episode_with_genome(genes, steps=STEPS, fitness_variant="EA1", k_side=0.5):
+    """One episode with oscillator parameters; fitness = unified displacement metric (with rate limiting + warm-up)."""
 
     model, data = build_model()
     core_body, forward_xy0 = _bind_core_body_and_forward_xy(model, data)
@@ -221,13 +239,14 @@ def run_episode_with_genome(genes, steps=STEPS,fitness_variant="EA1", k_side=0.5
     history = [core_body.xpos[:2].copy()]  # log initial pose BEFORE stepping
 
     # Rate-limited control application
-    # Start from current ctrl (usually zeros)
     u_apply = data.ctrl.copy()
 
     for t in range(steps):
         t_sec = t * DT
+        # Amplitude warm-up to let large-A solutions settle
+        ramp = min(1.0, t / max(1, WARMUP_STEPS))
         # Desired command from oscillator
-        u_cmd = OFFSET + A * np.sin(2.0 * math.pi * F * t_sec + PHASE)
+        u_cmd = OFFSET + (A * ramp) * np.sin(2.0 * math.pi * F * t_sec + PHASE)
         u_cmd = np.clip(u_cmd, -HINGE_LIMIT, HINGE_LIMIT)
 
         # Per-step rate limiting
@@ -257,6 +276,7 @@ except AttributeError:
 
 toolbox = base.Toolbox()
 
+
 def make_evaluator(steps=STEPS, fitness_variant="EA1", k_side=0.5):
     def _eval(ind):
         val = run_episode_with_genome(
@@ -265,8 +285,21 @@ def make_evaluator(steps=STEPS, fitness_variant="EA1", k_side=0.5):
         return (val,)
     return _eval
 
+
+# --- Initialization biased toward larger amplitudes & modest offsets ---
 def init_ind():
-    return creator.Individual(np.random.uniform(LOW_BOUNDS, HI_BOUNDS).tolist())
+    genes = np.empty(GENOME_SIZE, dtype=float)
+    for j in range(NU):
+        # High‑amplitude bias via Beta(5,2) ∈ [0,1]
+        a = float(np.clip(np.random.beta(5.0, 2.0) * HI_A, LOW_A, HI_A))
+        # Keep frequencies in comfortable range (still within bounds)
+        f = float(np.clip(np.random.uniform(0.6, 1.8), LOW_F, HI_F))
+        p = float(np.random.uniform(LOW_P, HI_P))
+        # Small offsets around 0 (helps avoid saturating hinges)
+        o = float(np.clip(np.random.normal(loc=0.0, scale=0.2 * HINGE_LIMIT), LOW_O, HI_O))
+        genes[4*j:4*j+4] = [a, f, p, o]
+    return creator.Individual(genes.tolist())
+
 
 toolbox.register("individual", init_ind)
 toolbox.register("population", tools.initRepeat, list, toolbox.individual)
@@ -275,7 +308,10 @@ ETA = 20.0
 low_list = LOW_BOUNDS.tolist()
 up_list  = HI_BOUNDS.tolist()
 
+# Tournament selection stays the same
 toolbox.register("select", tools.selTournament, tournsize=3)
+
+# Baseline SBX crossover (bounded)
 toolbox.register(
     "mate",
     tools.cxSimulatedBinaryBounded,
@@ -283,18 +319,50 @@ toolbox.register(
     up=up_list,
     eta=ETA,
 )
-toolbox.register(
-    "mutate",
-    tools.mutPolynomialBounded,
-    low=low_list,
-    up=up_list,
-    eta=ETA,
-    indpb=1.0/GENOME_SIZE,
-)
+
+# We'll keep DEAP's polynomial mutation as a base and add amplitude "kicks" below
+_base_mut = tools.mutPolynomialBounded
+
+
+def _amplitude_kick(ind, frac_joints=0.3, scale=0.25):
+    """Heavy‑tailed kicks on A genes for a random subset of joints.
+    scale is relative to HI_A.
+    """
+    n_pick = max(1, int(frac_joints * NU))
+    idx_A = [4*j for j in range(NU)]
+    pick = random.sample(idx_A, n_pick)
+    for i in pick:
+        # Cauchy step (heavy‑tailed) encourages occasional big jumps
+        cauchy = math.tan(math.pi * (random.random() - 0.5))
+        step = cauchy * (scale * HI_A)
+        newA = float(np.clip(ind[i] + step, LOW_A, HI_A))
+        # If amplitude stayed too small, bias upward a bit
+        if newA < 0.4 * HI_A:
+            newA = min(HI_A, newA + 0.3 * HI_A)
+        ind[i] = newA
+
+
+# Wrapper mutate used by our EA loop
+# (keeps same signature usage as before)
+def mutate(offspring, mutpb, amp_kick_prob=0.5):
+    for m in offspring:
+        changed = False
+        if random.random() < mutpb:
+            _base_mut(m, low=low_list, up=up_list, eta=ETA, indpb=1.0/GENOME_SIZE)
+            changed = True
+        # Occasionally layer on amplitude kicks
+        if random.random() < amp_kick_prob:
+            _amplitude_kick(m, frac_joints=0.3, scale=0.25)
+            changed = True
+        if changed and hasattr(m.fitness, "values"):
+            del m.fitness.values
+    return offspring
+
 
 # ----------------------------
 # Experiment runners
 # ----------------------------
+
 def run_random_experiment(num_runs=100, steps=500, out_png=RAND_LINE_PNG, fitness_variant="EA1", k_side=0.5):
     rng = np.random.default_rng(42)
     fitnesses = []
@@ -322,7 +390,8 @@ def run_random_experiment(num_runs=100, steps=500, out_png=RAND_LINE_PNG, fitnes
     print(f"[Random] Saved line chart to {out_png}")
     return fitnesses
 
-def crossover(offspring,cxpb):
+
+def crossover(offspring, cxpb):
     for c1, c2 in zip(offspring[::2], offspring[1::2]):
         if random.random() < cxpb:
             toolbox.mate(c1, c2)
@@ -332,19 +401,13 @@ def crossover(offspring,cxpb):
                 del c2.fitness.values
     return offspring
 
-def mutate(offspring, mutpb):
-    for m in offspring:
-        if random.random() < mutpb:
-            toolbox.mutate(m)
-            if hasattr(m.fitness, "values"):
-                del m.fitness.values
-    return offspring
 
+# Improved EA: elitism + random immigrants + adaptive mutation on stagnation
 def run_ea_experiment(pop_size=100, n_gen=100, cxpb=0.9, mutpb=0.2, steps=STEPS, out_png=EA_FITNESS_PNG, fitness_variant="EA1", k_side=0.5):
     toolbox.register("evaluate", make_evaluator(
-    steps=steps,
-    fitness_variant=fitness_variant,
-    k_side=k_side
+        steps=steps,
+        fitness_variant=fitness_variant,
+        k_side=k_side
     ))
     # initial population
     pop = toolbox.population(n=pop_size)
@@ -354,7 +417,19 @@ def run_ea_experiment(pop_size=100, n_gen=100, cxpb=0.9, mutpb=0.2, steps=STEPS,
     for ind in invalid:
         ind.fitness.values = toolbox.evaluate(ind)
 
+    # Elitism via Hall of Fame
+    ELITE_K = max(1, pop_size // 20)  # top 5%
+    hof = tools.HallOfFame(ELITE_K)
+    hof.update(pop)
+
     best_per_gen = [tools.selBest(pop, 1)[0].fitness.values[0]]
+
+    # Stagnation tracking
+    no_improve = 0
+    best_so_far = best_per_gen[-1]
+
+    # Random immigrants fraction
+    IMM_FRAC = 0.10
 
     for gen in range(1, n_gen + 1):
         offspring = toolbox.select(pop, len(pop))
@@ -362,23 +437,60 @@ def run_ea_experiment(pop_size=100, n_gen=100, cxpb=0.9, mutpb=0.2, steps=STEPS,
 
         # crossover & mutation
         offspring = crossover(offspring, cxpb)
-        offspring = mutate(offspring, mutpb)
+
+        # Adapt mutation if stagnating
+        adapt_mutpb = mutpb
+        amp_kick_prob = 0.5
+        if no_improve >= 5:
+            adapt_mutpb = min(1.0, mutpb * 1.8)
+            amp_kick_prob = 0.6  # push harder on amplitude exploration
+        if no_improve >= 10:
+            adapt_mutpb = min(1.0, mutpb * 2.5)
+            amp_kick_prob = 0.8
+
+        offspring = mutate(offspring, adapt_mutpb, amp_kick_prob=amp_kick_prob)
+
+        # Random immigrants replace a fraction before evaluation
+        n_imm = max(0, int(IMM_FRAC * len(offspring)))
+        for _ in range(n_imm):
+            idx = random.randrange(len(offspring))
+            offspring[idx] = toolbox.individual()
 
         # evaluate new/changed individuals
         invalid = [ind for ind in offspring if not ind.fitness.valid]
         for ind in invalid:
             ind.fitness.values = toolbox.evaluate(ind)
 
-        # replace population
-        pop[:] = offspring
+        # Elitism: keep top ELITE_K from previous pop (tracked by HOF)
+        hof.update(offspring)
+        elites = list(map(toolbox.clone, hof.items))
+
+        # replace population (elitism injected)
+        # Keep the best ELITE_K overall, fill the rest with offspring
+        offspring.sort(key=lambda ind: ind.fitness.values[0], reverse=True)
+        pop = elites + offspring[: max(0, pop_size - len(elites))]
 
         # record best of this generation
         best = tools.selBest(pop, 1)[0].fitness.values[0]
         best_per_gen.append(best)
-        print(f"[EA] Gen {gen:3d} | best fitness = {best:.4f}")
-        if gen % 5 == 0:
-            Fs = np.array([ind[1::4] for ind in pop], dtype=float).ravel()
-            print(f"[EA]   F stats — mean {Fs.mean():.2f} Hz | "f"median {np.median(Fs):.2f} | min {Fs.min():.2f} | max {Fs.max():.2f}")
+
+        # stagnation update
+        if best > best_so_far + 1e-9:
+            best_so_far = best
+            no_improve = 0
+        else:
+            no_improve += 1
+
+        # Logging
+        Fs = np.array([ind[1::4] for ind in pop], dtype=float).ravel()
+        As = np.array([ind[0::4] for ind in pop], dtype=float).ravel()
+        bigA = (As > 0.7 * HI_A).mean() * 100.0
+        if gen % 1 == 0:
+            print(
+                f"[EA] Gen {gen:3d} | best = {best:.4f} | no_improve={no_improve:2d} | "
+                f"F mean {Fs.mean():.2f} Hz (min {Fs.min():.2f}, max {Fs.max():.2f}) | "
+                f"A mean {As.mean():.2f} rad | >0.6*HI {bigA:4.1f}%"
+            )
 
     # Plot best fitness by generation
     plt.figure(figsize=(8, 4))
@@ -397,6 +509,7 @@ def run_ea_experiment(pop_size=100, n_gen=100, cxpb=0.9, mutpb=0.2, steps=STEPS,
     return best_ind, best_per_gen
 
 
+
 def get_z_scores(results, eps=1e-12):
     out = defaultdict(dict)
 
@@ -410,7 +523,7 @@ def get_z_scores(results, eps=1e-12):
         mu = float(rand.mean()) if rand.size else float("nan")
         sd = float(rand.std())  if rand.size else float("nan")
 
-        # minimal error management 
+        # minimal error management
         if sd == 0:
             sd = eps
         # Z scores
@@ -424,13 +537,15 @@ def get_z_scores(results, eps=1e-12):
         out[mode]["ea_z_scores"] = z
 
     return out
+
 # ----------------------------
 # Main
 # ----------------------------
+
 def main():
     random.seed(42)
     np.random.seed(42)
-    results = defaultdict(dict)    
+    results = defaultdict(dict)
     # 1) Random experiment
     NUM_RANDOM_RUNS = 20
     Fits_EA1_rand = run_random_experiment(num_runs=NUM_RANDOM_RUNS, steps=STEPS, out_png=RAND_LINE_PNG, fitness_variant="EA1")
@@ -463,7 +578,7 @@ def main():
     plt.figure(figsize=(8, 4))
     for model, stats in Z_results.items():
         z = stats["ea_z_scores"]
-        x = np.arange(len(z)) 
+        x = np.arange(len(z))
         legend_label = f"{model} z_scores"
         plt.plot(x, z, marker="o", linestyle="-", label=legend_label)
 
@@ -474,33 +589,13 @@ def main():
     plt.legend(fontsize=8)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig("Z_scores_comparison_20_GEN", dpi=150)
+    plt.savefig("Z_scores_comparison_n1_20_gen", dpi=150)
     plt.close()
 
     # 4) Render the best of EA2B (straighter gait, better for demo)
     print("[Render] Rendering EA2B best individual (real-time)...")
     render_episode_with_genome_realtime(best2, duration_sec=None)
-'''
-   # 2) EA experiment
-    POP_SIZE = 100
-    NGEN = 100
-    CXPB = 0.9
-    MUTPB = 0.2
-    best_ind, best_per_gen = run_ea_experiment(
-        pop_size=POP_SIZE,
-        n_gen=NGEN,
-        cxpb=CXPB,
-        mutpb=MUTPB,
-        steps=STEPS,
-        out_png=EA_FITNESS_PNG
-    )
 
-    # 3) Render final best individual
-    print("[Render] Rendering final best individual (real-time)...")
-    render_episode_with_genome_realtime(best_ind, duration_sec=None)
-    # If you prefer exact replay instead:
-    # print("[Render] Rendering final best individual (exact replay)...")
-    # render_episode_with_genome_exact(best_ind, steps=STEPS)
-'''
+
 if __name__ == "__main__":
     main()
