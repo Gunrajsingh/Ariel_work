@@ -24,6 +24,7 @@ import mujoco
 import matplotlib.pyplot as plt
 from collections import defaultdict
 from deap import base, creator, tools
+import json
 
 from ariel.simulation.environments.simple_flat_world import SimpleFlatWorld
 from ariel.body_phenotypes.robogen_lite.prebuilt_robots.gecko import gecko
@@ -542,6 +543,18 @@ def get_z_scores(results, eps=1e-12):
         out[mode]["ea_z_scores"] = z
     return out
 
+def save_controller(genes):
+    data = {
+        "controller_type": "sinewave",
+        "robot": "gecko",
+        "environment": "SimpleFlatWorld",
+        "per_joint_format": ["A","F","PHASE","OFFSET"],
+        "nu": NU,
+        "genes": [float(x) for x in genes],
+    }
+    with open("controller_data", "w") as f:
+        json.dump(data, f, indent=2)
+
 # ----------------------------
 # Main: run each algorithm 3 times, NGEN=30 (random episodes = 30), and save CSVs
 # ----------------------------
@@ -567,7 +580,7 @@ def main():
         "pop_size","n_gen","steps","cxpb","mutpb","seed"
     ]
 
-    total_runs = 3
+    total_runs = 1
     base_seed = 42
     best_ea2b_last = None
 
@@ -645,8 +658,7 @@ def main():
         write_csv(ea2b_csv, rows, ea_master_header)
         ea_master_rows.extend(rows)
 
-        #best_ea2b_last = best2
-
+    save_controller(best1)
     # Write combined EA master CSV (all runs, both algorithms)
     ea_master_csv = os.path.join(out_dir, "ea_all_runs_master.csv")
     write_csv(ea_master_csv, ea_master_rows, ea_master_header)
