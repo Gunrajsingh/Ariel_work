@@ -1,0 +1,83 @@
+:py:mod:`crater_heightmap`
+========================================================
+
+.. py:module:: ariel.simulation.environments.crater_heightmap
+
+
+Module Contents
+---------------
+
+Classes
+~~~~~~~
+
+.. autoapisummary::
+
+   ariel.simulation.environments.crater_heightmap.CraterTerrainWorld
+
+
+
+
+Attributes
+~~~~~~~~~~
+
+.. autoapisummary::
+
+   ariel.simulation.environments.crater_heightmap.USE_DEGREES
+   ariel.simulation.environments.crater_heightmap.TERRAIN_COLOR
+
+
+.. py:data:: USE_DEGREES
+   :value: False
+
+
+.. py:data:: TERRAIN_COLOR
+   :value: [0.5, 0.4, 0.3, 1.0]
+
+
+.. py:class:: CraterTerrainWorld(size: Tuple[float, float] = (10.0, 10.0), resolution: int = 128, crater_depth: float = 3, crater_radius: float = 5, height: float = 5, ruggedness: float = 0.01)
+
+   MuJoCo world with a crater-like terrain using a heightfield.
+
+
+   .. py:attribute:: size
+      :value: (10.0, 10.0)
+
+
+
+   .. py:attribute:: resolution
+      :value: 128
+
+
+
+   .. py:attribute:: crater_depth
+      :value: 3
+
+
+
+   .. py:attribute:: crater_radius
+      :value: 5
+
+
+
+   .. py:attribute:: height
+      :value: 5
+
+
+
+   .. py:attribute:: ruggedness
+      :value: 0.01
+
+
+
+   .. py:attribute:: heightmap
+
+
+   .. py:attribute:: spec
+
+
+   .. py:method:: spawn(mj_spec: mujoco.MjSpec, spawn_position: list[float] | None = None, *, small_gap: float = 0.0, correct_for_bounding_box: bool = True) -> None
+
+      Spawn a robot into the crater world.
+
+
+

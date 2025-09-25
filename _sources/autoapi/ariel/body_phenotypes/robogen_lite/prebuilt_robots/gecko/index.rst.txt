@@ -1,0 +1,25 @@
+:py:mod:`gecko`
+==================================================================
+
+.. py:module:: ariel.body_phenotypes.robogen_lite.prebuilt_robots.gecko
+
+
+Module Contents
+---------------
+
+
+Functions
+~~~~~~~~~
+
+.. autoapisummary::
+
+   ariel.body_phenotypes.robogen_lite.prebuilt_robots.gecko.gecko
+
+
+
+.. py:function:: gecko()
+
+   Create and attach bodies/sites, then print relative orientations between
+   abdomen and spine bodies to debug hinge placement/orientation.
+
+

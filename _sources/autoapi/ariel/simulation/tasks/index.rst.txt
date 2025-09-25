@@ -1,0 +1,24 @@
+:py:mod:`tasks`
+================================
+
+.. py:module:: ariel.simulation.tasks
+
+
+Submodules
+----------
+.. toctree::
+   :titlesonly:
+   :maxdepth: 1
+
+   gate_learning/index.rst
+   targeted_locomotion/index.rst
+   turning_in_place/index.rst
+
+
+Package Contents
+----------------
+
+.. py:data:: tasks
+   :value: ['Gate Learning', 'Targeted Locomotion', 'Turning In Place']
+
+

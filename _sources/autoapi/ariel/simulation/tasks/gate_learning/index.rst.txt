@@ -1,0 +1,59 @@
+:py:mod:`gate_learning`
+==============================================
+
+.. py:module:: ariel.simulation.tasks.gate_learning
+
+
+Module Contents
+---------------
+
+
+Functions
+~~~~~~~~~
+
+.. autoapisummary::
+
+   ariel.simulation.tasks.gate_learning.xy_displacement
+   ariel.simulation.tasks.gate_learning.x_speed
+   ariel.simulation.tasks.gate_learning.y_speed
+
+
+
+.. py:function:: xy_displacement(xy1, xy2) -> float
+
+   Calculate the displacement between two points in 2D space.
+
+   Parameters:
+   xy1 (tuple): Coordinates of the first point (x1, y1).
+   xy2 (tuple): Coordinates of the second point (x2, y2).
+
+   Returns:
+   float: The Euclidean distance between the two points.
+
+
+.. py:function:: x_speed(xy1, xy2, dt) -> float
+
+   Calculate the speed in the x direction between two points.
+
+   Parameters:
+   xy1 (tuple): Coordinates of the first point (x1, y1).
+   xy2 (tuple): Coordinates of the second point (x2, y2).
+   dt (float): Time difference between the two points.
+
+   Returns:
+   float: The speed in the x direction.
+
+
+.. py:function:: y_speed(xy1, xy2, dt) -> float
+
+   Calculate the speed in the y direction between two points.
+
+   Parameters:
+   xy1 (tuple): Coordinates of the first point (x1, y1).
+   xy2 (tuple): Coordinates of the second point (x2, y2).
+   dt (float): Time difference between the two points.
+
+   Returns:
+   float: The speed in the y direction.
+
+
