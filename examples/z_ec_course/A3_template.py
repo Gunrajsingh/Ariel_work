@@ -27,6 +27,66 @@ from ariel.utils.runners import simple_runner
 from ariel.utils.tracker import Tracker
 from ariel.utils.video_recorder import VideoRecorder
 
+SBX_ETA = 20.0   # SBX distribution index (10 to 30 typical)
+
+# ==== Body genotype: tuple of (type_p, conn_p, rot_p) ====
+def init_body_genotype(rng, n_modules):
+    type_p = rng.random(n_modules)
+    conn_p = rng.random(n_modules)
+    rot_p  = rng.random(n_modules)
+    return (type_p, conn_p, rot_p)
+
+# ==== SBX crossover on [0,1] ====
+def _sbx_pair(a, b, eta, low=0.0, high=1.0, rng=None):
+    rng = rng or np.random.default_rng()
+    u = rng.random(a.shape)
+    beta = np.empty_like(a)
+    mask = u <= 0.5
+    beta[mask]  = (2.0 * u[mask])**(1.0/(eta+1.0))
+    beta[~mask] = (1.0/(2.0*(1.0-u[~mask])))**(1.0/(eta+1.0))
+    c1 = 0.5*((a+b) - beta*np.abs(b-a))
+    c2 = 0.5*((a+b) + beta*np.abs(b-a))
+    return np.clip(c1, low, high), np.clip(c2, low, high)
+
+def sbx_crossover(p1, p2, eta=SBX_ETA, rng=None):
+    rng = rng or np.random.default_rng()
+    t1, t2 = _sbx_pair(p1[0], p2[0], eta, rng=rng)
+    c1c, c2c = _sbx_pair(p1[1], p2[1], eta, rng=rng)
+    c1r, c2r = _sbx_pair(p1[2], p2[2], eta, rng=rng)
+    return (t1, c1c, c1r), (t2, c2c, c2r)
+
+# ==== Block mutation (random reset) ====
+def block_reset_mutation(geno, rng=None, block_size=None):
+    rng = rng or np.random.default_rng()
+    type_p, conn_p, rot_p = geno
+    L = len(type_p)
+    if block_size is None:
+        block_size = int(rng.integers(2, min(6, L+1)))
+    start = int(rng.integers(0, L - block_size + 1))
+    end = start + block_size
+    type_p[start:end] = rng.random(block_size)
+    conn_p[start:end] = rng.random(block_size)
+    rot_p[start:end]  = rng.random(block_size)
+    return (type_p, conn_p, rot_p)
+
+# ==== Genotype -> MuJoCo spec ====
+def build_body(geno, nde_modules, rng=None):
+    rng = rng or np.random.default_rng()
+    type_p, conn_p, rot_p = geno
+
+    # clamp to [0,1]
+    type_p = np.clip(type_p, 0.0, 1.0)
+    conn_p = np.clip(conn_p, 0.0, 1.0)
+    rot_p  = np.clip(rot_p,  0.0, 1.0)
+
+    nde = NeuralDevelopmentalEncoding(number_of_modules=nde_modules)
+    p_mats = nde.forward((type_p, conn_p, rot_p))
+
+    decoder = HighProbabilityDecoder(rng)
+    graph = decoder.decode(p_mats)
+    mjspec = construct_mjspec_from_graph(graph)
+    return graph, mjspec
+
 # Type Checking
 if TYPE_CHECKING:
     from networkx import DiGraph
