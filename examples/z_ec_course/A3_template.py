@@ -97,7 +97,7 @@ RATE_LIMIT_DU = 0.025
 HINGE_LIMIT = math.pi / 2
 WARMUP_STEPS = 120  # ~0.5 s at 240 Hz; simple_runner uses default dt
 HARD_TIMEOUT = 15  # wall-clock safety
-SPAWN_POS = [-0.8, 0, np.float64(18.68007496458845)]  # left as-is per user note
+SPAWN_POS = [-0.8, 0, 0.1]  # match empty A3 template (grounded with small clearance)
 TARGET_POSITION = [5, 0, 0.5]
 
 # Body encoding
@@ -108,6 +108,76 @@ NUM_OF_MODULES = 30
 EA_FITNESS_PNG = DATA / "ea_best_over_generations.png"
 
 # =========================
+# A2 brain loader (learned controller)
+# =========================
+CONTROLLER_JSON_PATH = "controller_data"
+_A2_BRAIN_CACHE = None  # lazy cache
+
+
+def _solve_inp_len(theta_len: int, hidden: int, out_dim: int) -> int:
+    # theta = inp*h + h  +  h*h + h  +  h*out + out
+    #       = h*(inp + h + out + 2) + out
+    # => inp = (theta - out)/h - h - out - 2
+    num = theta_len - out_dim
+    inp_float = num / float(hidden) - hidden - out_dim - 2
+    inp = int(round(inp_float))
+    if inp < 1:
+        raise ValueError(f"Bad dims: theta_len={theta_len}, hidden={hidden}, out={out_dim}")
+    return inp
+
+
+def _unpack_theta(theta: np.ndarray, inp: int, hidden: int, out_dim: int):
+    i = 0
+    W1 = theta[i:i + inp * hidden].reshape(inp, hidden)
+    i += inp * hidden
+    b1 = theta[i:i + hidden]
+    i += hidden
+    W2 = theta[i:i + hidden * hidden].reshape(hidden, hidden)
+    i += hidden * hidden
+    b2 = theta[i:i + hidden]
+    i += hidden
+    W3 = theta[i:i + hidden * out_dim].reshape(hidden, out_dim)
+    i += hidden * out_dim
+    b3 = theta[i:i + out_dim]
+    return (W1, b1, W2, b2, W3, b3)
+
+
+def _mlp_forward(x: np.ndarray, params) -> np.ndarray:
+    W1, b1, W2, b2, W3, b3 = params
+    h1 = np.tanh(x @ W1 + b1)
+    h2 = np.tanh(h1 @ W2 + b2)
+    y = np.tanh(h2 @ W3 + b3)  # [-1, 1]
+    return y
+
+
+def _load_a2_brain(path: str = CONTROLLER_JSON_PATH):
+    global _A2_BRAIN_CACHE
+    if _A2_BRAIN_CACHE is not None:
+        return _A2_BRAIN_CACHE
+
+    try:
+        with open(path, "r") as f:
+            blob = json.load(f)
+        theta = np.asarray(blob["theta"], dtype=float)
+        hidden = int(blob["hidden"])
+        out_saved = int(blob["nu"])
+        inp_saved = _solve_inp_len(len(theta), hidden, out_saved)
+        params = _unpack_theta(theta, inp_saved, hidden, out_saved)
+        _A2_BRAIN_CACHE = {
+            "params": params,
+            "inp_saved": inp_saved,
+            "hidden": hidden,
+            "out_saved": out_saved,
+        }
+        console.log(
+            f"[Brain] Loaded A2 MLP: inp={inp_saved}, hidden={hidden}, out={out_saved}, theta_len={len(theta)}"
+        )
+    except Exception as e:
+        console.log(f"[Brain] Could not load controller_data ({e}); falling back to random stub.")
+        _A2_BRAIN_CACHE = None
+    return _A2_BRAIN_CACHE
+
+# =========================
 # Genotype and operators for BODY
 # =========================
 def init_body_genotype(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -116,7 +186,8 @@ def init_body_genotype(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np
     r = rng.random(n).astype(np.float32)
     return (t, c, r)
 
-def _sbx_pair(a: np.ndarray, b: np.ndarray, eta: float, low=0.0, high=1.0, rng: np.random.Generator | None=None):
+
+def _sbx_pair(a: np.ndarray, b: np.ndarray, eta: float, low=0.0, high=1.0, rng: np.random.Generator | None = None):
     rng = rng or np.random.default_rng
     u = rng.random(a.shape, dtype=np.float32)
     beta = np.empty_like(a, dtype=np.float32)
@@ -127,26 +198,33 @@ def _sbx_pair(a: np.ndarray, b: np.ndarray, eta: float, low=0.0, high=1.0, rng: 
     c2 = 0.5 * ((a + b) + beta * (b - a))
     return np.clip(c1, low, high), np.clip(c2, low, high)
 
-def sbx_body(g1: tuple[np.ndarray, np.ndarray, np.ndarray],
-             g2: tuple[np.ndarray, np.ndarray, np.ndarray],
-             eta: float = SBX_ETA,
-             rng: np.random.Generator | None=None) -> tuple[tuple[np.ndarray, np.ndarray, np.ndarray],
-                                                            tuple[np.ndarray, np.ndarray, np.ndarray]]:
+
+def sbx_body(
+    g1: tuple[np.ndarray, np.ndarray, np.ndarray],
+    g2: tuple[np.ndarray, np.ndarray, np.ndarray],
+    eta: float = SBX_ETA,
+    rng: np.random.Generator | None = None,
+) -> tuple[tuple[np.ndarray, np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray, np.ndarray]]:
     a1, b1 = _sbx_pair(g1[0], g2[0], eta, rng=rng)
     a2, b2 = _sbx_pair(g1[1], g2[1], eta, rng=rng)
     a3, b3 = _sbx_pair(g1[2], g2[2], eta, rng=rng)
     return (a1, a2, a3), (b1, b2, b3)
 
-def block_mutation(g: tuple[np.ndarray, np.ndarray, np.ndarray],
-                   indpb: float = 1.0 / BODY_L,
-                   rng: np.random.Generator | None=None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+
+def block_mutation(
+    g: tuple[np.ndarray, np.ndarray, np.ndarray],
+    indpb: float = 1.0 / BODY_L,
+    rng: np.random.Generator | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     rng = rng or np.random.default_rng()
     t, c, r = g
     # reset each gene with prob indpb
     mask_t = rng.random(t.shape) < indpb
     mask_c = rng.random(c.shape) < indpb
     mask_r = rng.random(r.shape) < indpb
-    t = t.copy(); c = c.copy(); r = r.copy()
+    t = t.copy()
+    c = c.copy()
+    r = r.copy()
     t[mask_t] = rng.random(np.count_nonzero(mask_t)).astype(np.float32)
     c[mask_c] = rng.random(np.count_nonzero(mask_c)).astype(np.float32)
     r[mask_r] = rng.random(np.count_nonzero(mask_r)).astype(np.float32)
@@ -161,18 +239,25 @@ class BuiltBody:
     decoded_graph: Any
     mjspec: Any
 
+
 def build_body(geno: tuple[np.ndarray, np.ndarray, np.ndarray], nde_modules: int, rng: np.random.Generator) -> BuiltBody:
     t, c, r = geno
     # --- NDE API per template: construct with module count, then forward([t,c,r]) ---
-    t = t.astype(np.float32); c = c.astype(np.float32); r = r.astype(np.float32)
+    t = t.astype(np.float32)
+    c = c.astype(np.float32)
+    r = r.astype(np.float32)
     nde = NeuralDevelopmentalEncoding(number_of_modules=nde_modules)
     # compatibility for downstream saving
-    nde.t = t; nde.c = c; nde.r = r; nde.n_modules = nde_modules
+    nde.t = t
+    nde.c = c
+    nde.r = r
+    nde.n_modules = nde_modules
     p_mats = nde.forward([t, c, r])
     decoder = HighProbabilityDecoder(nde_modules)
     graph = decoder.probability_matrices_to_graph(p_mats[0], p_mats[1], p_mats[2])
     spec = construct_mjspec_from_graph(graph)
     return BuiltBody(nde=nde, decoded_graph=graph, mjspec=spec)
+
 
 def save_body_artifacts(run_dir: Path, built: BuiltBody, tag: str):
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -196,6 +281,7 @@ HINGE_LIMIT = math.pi / 2
 RATE_LIMIT_DU = 0.025
 WARMUP_STEPS = 120  # ~0.5 s at 240 Hz; simple_runner uses default dt
 
+
 def nn_controller(model: mj.MjModel, data: mj.MjData) -> npt.NDArray[np.float64]:
     """Simple 3-layer random-weight NN per step. Placeholder."""
     inp = len(data.qpos)
@@ -204,58 +290,123 @@ def nn_controller(model: mj.MjModel, data: mj.MjData) -> npt.NDArray[np.float64]
     w1 = RNG.normal(0.0, 0.5, size=(inp, hid))
     w2 = RNG.normal(0.0, 0.5, size=(hid, hid))
     w3 = RNG.normal(0.0, 0.5, size=(hid, out))
-    x  = data.qpos
+    x = data.qpos
     h1 = np.tanh(x @ w1)
     h2 = np.tanh(h1 @ w2)
-    y  = np.tanh(h2 @ w3)
+    y = np.tanh(h2 @ w3)
     return y * np.pi
 
 # =========================
 # Evaluation harness (patched)
 # =========================
-def run_episode_for_genotype(body_geno, duration: int = SIM_DURATION, mode: Literal["simple","no_render"]="simple"):
+def _choose_track_body(model: mj.MjModel) -> str:
+    # Prefer 'robot-core' if present, else first non-world body
+    bid = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, "robot-core")
+    if bid != -1:
+        return "robot-core"
+    return mj.mj_id2name(model, mj.mjtObj.mjOBJ_BODY, 1 if model.nbody > 1 else 0)
+
+
+def run_episode_for_genotype(body_geno, duration: int = SIM_DURATION, mode: Literal["simple", "no_render"] = "simple"):
     """Build body, run in OlympicArena with stub controller, return (fitness, history_xyz, graph)."""
     mj.set_mjcb_control(None)
     world = OlympicArena()
 
     built = build_body(body_geno, nde_modules=NUM_OF_MODULES, rng=RNG)
 
-    # Spawn with the robot's MjSpec, compile with world.spec.compile() per working template
+    # Spawn and compile
     world.spawn(built.mjspec.spec, spawn_position=SPAWN_POS)
     model = world.spec.compile()
     data = mj.MjData(model)
     mj.mj_resetData(model, data)
+    mj.mj_forward(model, data)
 
-    # tracker for the "core" geom; matches your template
-    tracker = Tracker(mujoco_obj_to_find=mj.mjtObj.mjOBJ_GEOM, name_to_bind="core")
+    # Robust tracker: BODY (robot-core or first non-world body)
+    track_body = _choose_track_body(model)
+    tracker = Tracker(mujoco_obj_to_find=mj.mjtObj.mjOBJ_BODY, name_to_bind=track_body)
 
-    # ---- Fix 1+2: per-episode fixed weights and action safety (warm-up, rate limit, clamp) ----
+    # ---- Per-episode fixed weights and action safety; scale to actuator ctrlrange ----
     def _episode_controller():
-        inp = len(data.qpos)
-        hid = 8
-        out = model.nu
-        w1 = RNG.normal(0.0, 0.5, size=(inp, hid))
-        w2 = RNG.normal(0.0, 0.5, size=(hid, hid))
-        w3 = RNG.normal(0.0, 0.5, size=(hid, out))
-        u_apply = np.zeros(out, dtype=float)
         step = 0
+        brain = _load_a2_brain()
+        out = model.nu  # current body's actuators
+
+        # Actuator control ranges
+        ctrlrange = np.asarray(model.actuator_ctrlrange, dtype=float).reshape(out, 2)
+        low = ctrlrange[:, 0].copy()
+        high = ctrlrange[:, 1].copy()
+        limited = np.array(model.actuator_ctrllimited, dtype=bool).reshape(-1)
+
+        bad = (~limited) | ~np.isfinite(low) | ~np.isfinite(high) | (high <= low)
+        low[bad] = -1.0
+        high[bad] = 1.0
+
+        center = 0.5 * (low + high)
+        halfspan = 0.5 * (high - low)
+
+        # Start at center; rate limited per-joint (cap at A2 limit)
+        u_apply = center.copy()
+        base_rate = 0.02 * (high - low)
+        rate = np.minimum(base_rate, RATE_LIMIT_DU)
+
         def _cb(m: mj.MjModel, d: mj.MjData) -> npt.NDArray[np.float64]:
-            nonlocal u_apply, step, w1, w2, w3
-            x = d.qpos
-            h1 = np.tanh(x @ w1)
-            h2 = np.tanh(h1 @ w2)
-            y  = np.tanh(h2 @ w3) * math.pi  # raw command in radians
-            y  = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
-            # warm-up ramp
+            nonlocal u_apply, step, brain
+            # --- Build input in A2 format: [qpos, qvel, t, sin(2πt), cos(2πt)] ---
+            t_now = d.time
+            x_pq = np.concatenate([d.qpos, d.qvel]).astype(float, copy=False)
+
+            if brain is not None:
+                inp_saved = brain["inp_saved"]
+                out_saved = brain["out_saved"]
+                params = brain["params"]
+
+                x_in = np.zeros(inp_saved, dtype=float)
+                # Keep the final 3 time-features aligned as in A2
+                x_in[-3:] = [t_now, math.sin(2 * math.pi * t_now), math.cos(2 * math.pi * t_now)]
+                # Fill as much of [qpos,qvel] as fits before the last 3 slots
+                k = min(x_pq.size, inp_saved - 3)
+                if k > 0:
+                    x_in[:k] = x_pq[:k]
+
+                y = _mlp_forward(x_in, params)  # [-1,1] with out_saved dims
+
+                # Adapt output size to current robot's nu
+                if out_saved == out:
+                    y_out = y
+                elif out_saved > out:
+                    y_out = y[:out]
+                else:
+                    # repeat cyclically to cover all actuators
+                    y_out = np.resize(y, out)
+            else:
+                # Fallback: tiny random policy if no brain
+                hid = 8
+                w1 = RNG.normal(0.0, 0.1, size=(x_pq.size + 3, hid))
+                w2 = RNG.normal(0.0, 0.1, size=(hid, hid))
+                w3 = RNG.normal(0.0, 0.1, size=(hid, out))
+                x_in = np.concatenate(
+                    [x_pq, [t_now, math.sin(2 * math.pi * t_now), math.cos(2 * math.pi * t_now)]]
+                )
+                h1 = np.tanh(x_in @ w1)
+                h2 = np.tanh(h1 @ w2)
+                y_out = np.tanh(h2 @ w3)
+
+            y_out = np.nan_to_num(y_out, nan=0.0, posinf=0.0, neginf=0.0)
+
+            # Scale to actuator ctrlrange
+            u_target = center + halfspan * y_out
+
+            # Warm-up: ramp from center toward target
             ramp = 1.0 if WARMUP_STEPS <= 0 else min(1.0, step / max(1, WARMUP_STEPS))
-            u_cmd = ramp * y
-            # rate limit
-            du = np.clip(u_cmd - u_apply, -RATE_LIMIT_DU, RATE_LIMIT_DU)
-            u_apply = u_apply + du
-            # actuator range clamp
-            u_apply = np.clip(u_apply, -HINGE_LIMIT, HINGE_LIMIT)
+            u_cmd = center + ramp * (u_target - center)
+
+            # Rate limit in control units (vector)
+            du = np.clip(u_cmd - u_apply, -rate, rate)
+            u_apply = np.clip(u_apply + du, low, high)
+
             step += 1
             return u_apply.astype(np.float64, copy=False)
+
         return _cb
 
     episode_cb = _episode_controller()
@@ -264,6 +415,9 @@ def run_episode_for_genotype(body_geno, duration: int = SIM_DURATION, mode: Lite
     # Bind tracker
     if ctrl.tracker is not None:
         ctrl.tracker.setup(world.spec, data)
+
+    # Record start XY for fallback displacement
+    start_xy = np.array(data.body(track_body).xpos[:2], dtype=float).copy()
 
     # Set callback
     args: list[Any] = []
@@ -274,20 +428,21 @@ def run_episode_for_genotype(body_geno, duration: int = SIM_DURATION, mode: Lite
     if mode == "simple":
         simple_runner(model, data, duration=duration)
     else:
-        # No visual; same as simple
         simple_runner(model, data, duration=duration)
 
-    # --- PATCH 2: fixed NumPy truth-value ambiguity ---
+    # Preferred: tracker history; fallback: body position delta
     hist = tracker.history.get("xpos", [[]])
     if (
         hist is None
-        or len(hist) == 0
+        or len(hist) < 2
         or not isinstance(hist, (list, tuple))
         or not isinstance(hist[0], (list, tuple, np.ndarray))
     ):
-        hist = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+        end_xy = np.array(data.body(track_body).xpos[:2], dtype=float)
+        start3 = [start_xy[0], start_xy[1], 0.0]
+        end3 = [float(end_xy[0]), float(end_xy[1]), 0.0]
+        hist = [start3, end3]
 
-    # simple forward metric: x displacement
     disp = float(hist[-1][0] - hist[0][0])
     return disp, hist, built.decoded_graph
 
@@ -301,9 +456,8 @@ def render_snapshot(world, data, save_path: str | None = None):
             f.write(img)
     return img
 
+
 def show_xpos_history(history_xyz: list[list[float]], save_path: str | None = None) -> None:
-    """Overlay XY path on a background frame of the OlympicArena."""
-    # Background frame
     camera = mj.MjvCamera()
     camera.type = mj.mjtCamera.mjCAMERA_FREE
     camera.lookat = [2.5, 0, 0]
@@ -311,13 +465,11 @@ def show_xpos_history(history_xyz: list[list[float]], save_path: str | None = No
     camera.azimuth = 0
     camera.elevation = -90
 
-    # World background
     mj.set_mjcb_control(None)
     world = OlympicArena()
     model = world.spec.compile()
     data = mj.MjData(model)
     img = single_frame_renderer(world.spec, data, width=640, height=480)
-    # Simple placeholder: we only save the background image
     if save_path:
         with open(save_path, "wb") as f:
             f.write(img)
@@ -332,20 +484,20 @@ except AttributeError:
 try:
     creator.BodyIndividual
 except AttributeError:
-    # store the three numpy arrays inside a list-like Individual
     creator.create("BodyIndividual", list, fitness=creator.FitnessMax)
 
 toolbox = base.Toolbox()
 
+
 def init_individual():
     geno = init_body_genotype(RNG, BODY_L)
-    # Wrap inside a DEAP list; element 0 is the body genotype tuple
     return creator.BodyIndividual([geno])
+
 
 toolbox.register("individual", init_individual)
 toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
-# Crossover over the tuple of arrays
+
 def mate(ind1, ind2):
     g1 = ind1[0]
     g2 = ind2[0]
@@ -358,7 +510,7 @@ def mate(ind1, ind2):
         del ind2.fitness.values
     return ind1, ind2
 
-# Mutation: block reset on [0,1]
+
 def mutate(ind):
     g = ind[0]
     ind[0] = block_mutation(g, indpb=1.0 / BODY_L, rng=RNG)
@@ -366,37 +518,38 @@ def mutate(ind):
         del ind.fitness.values
     return (ind,)
 
+
 toolbox.register("mate", mate)
 toolbox.register("mutate", mutate)
 
-# Evaluation
+
 def evaluate_individual(ind):
     geno = ind[0]
     try:
         fit, hist, graph = run_episode_for_genotype(geno, duration=SIM_DURATION, mode="simple")
     except Exception as e:
         console.log(f"[Eval] Exception: {e}. Assigning poor fitness.")
-        fit, hist, graph = -1e9, [[0,0,0]], None
+        fit, hist, graph = -1e9, [[0, 0, 0]], None
     return (fit,)
+
 
 toolbox.register("evaluate", evaluate_individual)
 
-# ---- Fix 3: HallOfFame similarity must return a boolean ----
+
 def _hof_similar(a, b) -> bool:
-    # Individuals store the genotype tuple at index 0: (t, c, r) arrays in [0,1].
     try:
-        g1 = a[0]; g2 = b[0]
+        g1 = a[0]
+        g2 = b[0]
         v1 = np.concatenate([np.ravel(g1[0]), np.ravel(g1[1]), np.ravel(g1[2])])
         v2 = np.concatenate([np.ravel(g2[0]), np.ravel(g2[1]), np.ravel(g2[2])])
         return bool(np.allclose(v1, v2, atol=1e-12, rtol=1e-12))
     except Exception:
-        # Fallback: compare lengths to avoid ambiguous truth values
         try:
             return bool(len(a) == len(b))
         except Exception:
             return False
 
-# Selection
+
 toolbox.register("select", tools.selTournament, tournsize=TOURNSIZE)
 
 # =========================
@@ -406,15 +559,12 @@ def run_ea():
     random.seed(SEED)
     np.random.seed(SEED)
 
-    # Initial population
     pop = toolbox.population(n=POP_SIZE)
 
-    # Evaluate initial
     invalid = [ind for ind in pop if not ind.fitness.valid]
     for ind in invalid:
         ind.fitness.values = toolbox.evaluate(ind)
 
-    # Hall of Fame (elitism)
     ELITE_K = max(1, POP_SIZE // 20)
     hof = tools.HallOfFame(ELITE_K, similar=_hof_similar)
     hof.update(pop)
@@ -424,12 +574,10 @@ def run_ea():
     no_improve = 0
     best_so_far = best_per_gen[-1]
 
-    # Save initial best artifacts
     best0 = tools.selBest(pop, 1)[0]
     built0 = build_body(best0[0], nde_modules=NUM_OF_MODULES, rng=RNG)
     save_body_artifacts(DATA, built0, tag="gen_000_best")
     try:
-        # Snapshot
         world0 = OlympicArena()
         world0.spawn(built0.mjspec.spec, spawn_position=SPAWN_POS)
         m0 = world0.spec.compile()
@@ -440,16 +588,13 @@ def run_ea():
 
     t_wall = time.time()
     for gen in range(1, N_GEN + 1):
-        # Selection and clone
         offspring = toolbox.select(pop, len(pop))
         offspring = list(map(toolbox.clone, offspring))
 
-        # Crossover
         for c1, c2 in zip(offspring[::2], offspring[1::2]):
             if random.random() < CXPB:
                 toolbox.mate(c1, c2)
 
-        # Adaptive mutation
         adapt_mutpb = MUTPB
         if no_improve >= STAGNATION_STEPS[0]:
             adapt_mutpb = min(1.0, MUTPB * MUTPB_BOOSTS[0])
@@ -460,26 +605,21 @@ def run_ea():
             if random.random() < adapt_mutpb:
                 toolbox.mutate(m)
 
-        # Random immigrants
         n_imm = max(0, int(IMM_FRAC * len(offspring)))
         for _ in range(n_imm):
             idx = random.randrange(len(offspring))
             offspring[idx] = toolbox.individual()
 
-        # Evaluate
         invalid = [ind for ind in offspring if not ind.fitness.valid]
         for ind in invalid:
             ind.fitness.values = toolbox.evaluate(ind)
 
-        # Update HOF and elitism
         hof.update(offspring)
         elites = list(map(toolbox.clone, hof.items))
 
-        # Survivor selection: elitism + best of offspring
         offspring.sort(key=lambda ind: ind.fitness.values[0], reverse=True)
         pop = elites + offspring[: max(0, POP_SIZE - len(elites))]
 
-        # Track
         best = tools.selBest(pop, 1)[0]
         best_per_gen.append(best.fitness.values[0])
 
@@ -494,11 +634,9 @@ def run_ea():
             f"[EA] Gen {gen:3d} | best = {best.fitness.values[0]:.4f} | no_improve={no_improve:2d} | t={dt_wall:.1f}s"
         )
 
-        # Save per-gen best artifacts
         built = build_body(best[0], nde_modules=NUM_OF_MODULES, rng=RNG)
         save_body_artifacts(DATA, built, tag=f"gen_{gen:03d}_best")
 
-        # Snapshot
         try:
             world_g = OlympicArena()
             world_g.spawn(built.mjspec.spec, spawn_position=SPAWN_POS)
@@ -508,7 +646,6 @@ def run_ea():
         except Exception as e:
             console.log(f"[Render gen {gen}] {e}")
 
-    # Save curve
     try:
         import matplotlib.pyplot as plt
 
@@ -533,6 +670,7 @@ def run_ea():
 def main():
     best, curve = run_ea()
     print(f"[EA] Done. Best fitness = {best.fitness.values[0]:.4f}")
+
 
 if __name__ == "__main__":
     main()
