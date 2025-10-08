@@ -22,15 +22,12 @@ Outputs per run:
 Known limitations:
 - This A3 focuses on body evolution. Controller is a placeholder.
 - Rendering is off by default; turn on video if needed.
-
 """
 
 from __future__ import annotations
 
-import csv
 import json
 import math
-import os
 import random
 import time
 from dataclasses import dataclass
@@ -54,18 +51,9 @@ from ariel.body_phenotypes.robogen_lite.decoders.hi_prob_decoding import (
 from ariel.ec.genotypes.nde import NeuralDevelopmentalEncoding
 from ariel.simulation.controllers.controller import Controller
 from ariel.simulation.environments import OlympicArena
-from ariel.utils.renderers import single_frame_renderer, video_renderer
+from ariel.utils.renderers import single_frame_renderer
 from ariel.utils.runners import simple_runner
 from ariel.utils.tracker import Tracker
-from ariel.utils.video_recorder import VideoRecorder
-
-# =========================
-# Type checking
-# =========================
-try:
-    from typing import TypedDict
-except ImportError:  # py<3.8 fallback
-    TypedDict = dict  # type: ignore
 
 console = Console()
 
@@ -88,16 +76,16 @@ CXPB = 0.9
 MUTPB = 0.25
 SBX_ETA = 20.0
 IMM_FRAC = 0.10
-STAGNATION_STEPS = (5, 10)  # boosts at 5, 10
+STAGNATION_STEPS = (5, 10)
 MUTPB_BOOSTS = (1.8, 2.5)
 
 # Sim + environment
-SIM_DURATION = 15  # seconds
+SIM_DURATION = 15
 RATE_LIMIT_DU = 0.025
 HINGE_LIMIT = math.pi / 2
-WARMUP_STEPS = 120  # ~0.5 s at 240 Hz; simple_runner uses default dt
-HARD_TIMEOUT = 15  # wall-clock safety
-SPAWN_POS = [-0.8, 0, 0.1]  # match empty A3 template (grounded with small clearance)
+WARMUP_STEPS = 120
+HARD_TIMEOUT = 15
+SPAWN_POS = [-0.8, 0, 0.1]  # keep as-is
 TARGET_POSITION = [5, 0, 0.5]
 
 # Body encoding
@@ -111,13 +99,10 @@ EA_FITNESS_PNG = DATA / "ea_best_over_generations.png"
 # A2 brain loader (learned controller)
 # =========================
 CONTROLLER_JSON_PATH = "controller_data"
-_A2_BRAIN_CACHE = None  # lazy cache
+_A2_BRAIN_CACHE = None
 
 
 def _solve_inp_len(theta_len: int, hidden: int, out_dim: int) -> int:
-    # theta = inp*h + h  +  h*h + h  +  h*out + out
-    #       = h*(inp + h + out + 2) + out
-    # => inp = (theta - out)/h - h - out - 2
     num = theta_len - out_dim
     inp_float = num / float(hidden) - hidden - out_dim - 2
     inp = int(round(inp_float))
@@ -146,7 +131,7 @@ def _mlp_forward(x: np.ndarray, params) -> np.ndarray:
     W1, b1, W2, b2, W3, b3 = params
     h1 = np.tanh(x @ W1 + b1)
     h2 = np.tanh(h1 @ W2 + b2)
-    y = np.tanh(h2 @ W3 + b3)  # [-1, 1]
+    y = np.tanh(h2 @ W3 + b3)
     return y
 
 
@@ -154,7 +139,6 @@ def _load_a2_brain(path: str = CONTROLLER_JSON_PATH):
     global _A2_BRAIN_CACHE
     if _A2_BRAIN_CACHE is not None:
         return _A2_BRAIN_CACHE
-
     try:
         with open(path, "r") as f:
             blob = json.load(f)
@@ -218,7 +202,6 @@ def block_mutation(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     rng = rng or np.random.default_rng()
     t, c, r = g
-    # reset each gene with prob indpb
     mask_t = rng.random(t.shape) < indpb
     mask_c = rng.random(c.shape) < indpb
     mask_r = rng.random(r.shape) < indpb
@@ -242,12 +225,10 @@ class BuiltBody:
 
 def build_body(geno: tuple[np.ndarray, np.ndarray, np.ndarray], nde_modules: int, rng: np.random.Generator) -> BuiltBody:
     t, c, r = geno
-    # --- NDE API per template: construct with module count, then forward([t,c,r]) ---
     t = t.astype(np.float32)
     c = c.astype(np.float32)
     r = r.astype(np.float32)
     nde = NeuralDevelopmentalEncoding(number_of_modules=nde_modules)
-    # compatibility for downstream saving
     nde.t = t
     nde.c = c
     nde.r = r
@@ -261,10 +242,8 @@ def build_body(geno: tuple[np.ndarray, np.ndarray, np.ndarray], nde_modules: int
 
 def save_body_artifacts(run_dir: Path, built: BuiltBody, tag: str):
     run_dir.mkdir(parents=True, exist_ok=True)
-    # Save decoded graph JSON
     gpath = run_dir / f"{tag}_decoded_graph.json"
     save_graph_as_json(built.decoded_graph, str(gpath))
-    # Save NDE as JSON
     nde_json = {
         "t": built.nde.t.tolist(),
         "c": built.nde.c.tolist(),
@@ -277,13 +256,7 @@ def save_body_artifacts(run_dir: Path, built: BuiltBody, tag: str):
 # =========================
 # Controller (stub NN)
 # =========================
-HINGE_LIMIT = math.pi / 2
-RATE_LIMIT_DU = 0.025
-WARMUP_STEPS = 120  # ~0.5 s at 240 Hz; simple_runner uses default dt
-
-
 def nn_controller(model: mj.MjModel, data: mj.MjData) -> npt.NDArray[np.float64]:
-    """Simple 3-layer random-weight NN per step. Placeholder."""
     inp = len(data.qpos)
     hid = 8
     out = model.nu
@@ -297,10 +270,9 @@ def nn_controller(model: mj.MjModel, data: mj.MjData) -> npt.NDArray[np.float64]
     return y * np.pi
 
 # =========================
-# Evaluation harness (patched)
+# Evaluation harness using simple_runner
 # =========================
 def _choose_track_body(model: mj.MjModel) -> str:
-    # Prefer 'robot-core' if present, else first non-world body
     bid = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, "robot-core")
     if bid != -1:
         return "robot-core"
@@ -308,78 +280,67 @@ def _choose_track_body(model: mj.MjModel) -> str:
 
 
 def run_episode_for_genotype(body_geno, duration: int = SIM_DURATION, mode: Literal["simple", "no_render"] = "simple"):
-    """Build body, run in OlympicArena with stub controller, return (fitness, history_xyz, graph)."""
+    """
+    Build body, reset data, set controller, run headless via simple_runner.
+    Returns (fitness = x-displacement, history_xyz, graph).
+    """
     mj.set_mjcb_control(None)
+
     world = OlympicArena()
-
     built = build_body(body_geno, nde_modules=NUM_OF_MODULES, rng=RNG)
-
-    # Spawn and compile
     world.spawn(built.mjspec.spec, spawn_position=SPAWN_POS)
+
     model = world.spec.compile()
     data = mj.MjData(model)
+
+    # Reset then forward to make derived fields consistent
     mj.mj_resetData(model, data)
     mj.mj_forward(model, data)
 
-    # Robust tracker: BODY (robot-core or first non-world body)
     track_body = _choose_track_body(model)
     tracker = Tracker(mujoco_obj_to_find=mj.mjtObj.mjOBJ_BODY, name_to_bind=track_body)
 
-    # ---- Per-episode fixed weights and action safety; scale to actuator ctrlrange ----
+    # Record absolute start pose for robust fallback
+    start_xy = np.array(data.body(track_body).xpos[:2], dtype=float).copy()
+
     def _episode_controller():
         step = 0
         brain = _load_a2_brain()
-        out = model.nu  # current body's actuators
-
-        # Actuator control ranges
+        out = model.nu
         ctrlrange = np.asarray(model.actuator_ctrlrange, dtype=float).reshape(out, 2)
         low = ctrlrange[:, 0].copy()
         high = ctrlrange[:, 1].copy()
         limited = np.array(model.actuator_ctrllimited, dtype=bool).reshape(-1)
-
         bad = (~limited) | ~np.isfinite(low) | ~np.isfinite(high) | (high <= low)
         low[bad] = -1.0
         high[bad] = 1.0
-
         center = 0.5 * (low + high)
         halfspan = 0.5 * (high - low)
-
-        # Start at center; rate limited per-joint (cap at A2 limit)
         u_apply = center.copy()
         base_rate = 0.02 * (high - low)
         rate = np.minimum(base_rate, RATE_LIMIT_DU)
 
         def _cb(m: mj.MjModel, d: mj.MjData) -> npt.NDArray[np.float64]:
             nonlocal u_apply, step, brain
-            # --- Build input in A2 format: [qpos, qvel, t, sin(2πt), cos(2πt)] ---
             t_now = d.time
             x_pq = np.concatenate([d.qpos, d.qvel]).astype(float, copy=False)
-
             if brain is not None:
                 inp_saved = brain["inp_saved"]
                 out_saved = brain["out_saved"]
                 params = brain["params"]
-
                 x_in = np.zeros(inp_saved, dtype=float)
-                # Keep the final 3 time-features aligned as in A2
                 x_in[-3:] = [t_now, math.sin(2 * math.pi * t_now), math.cos(2 * math.pi * t_now)]
-                # Fill as much of [qpos,qvel] as fits before the last 3 slots
                 k = min(x_pq.size, inp_saved - 3)
                 if k > 0:
                     x_in[:k] = x_pq[:k]
-
-                y = _mlp_forward(x_in, params)  # [-1,1] with out_saved dims
-
-                # Adapt output size to current robot's nu
+                y = _mlp_forward(x_in, params)
                 if out_saved == out:
                     y_out = y
                 elif out_saved > out:
                     y_out = y[:out]
                 else:
-                    # repeat cyclically to cover all actuators
                     y_out = np.resize(y, out)
             else:
-                # Fallback: tiny random policy if no brain
                 hid = 8
                 w1 = RNG.normal(0.0, 0.1, size=(x_pq.size + 3, hid))
                 w2 = RNG.normal(0.0, 0.1, size=(hid, hid))
@@ -392,18 +353,11 @@ def run_episode_for_genotype(body_geno, duration: int = SIM_DURATION, mode: Lite
                 y_out = np.tanh(h2 @ w3)
 
             y_out = np.nan_to_num(y_out, nan=0.0, posinf=0.0, neginf=0.0)
-
-            # Scale to actuator ctrlrange
             u_target = center + halfspan * y_out
-
-            # Warm-up: ramp from center toward target
             ramp = 1.0 if WARMUP_STEPS <= 0 else min(1.0, step / max(1, WARMUP_STEPS))
             u_cmd = center + ramp * (u_target - center)
-
-            # Rate limit in control units (vector)
             du = np.clip(u_cmd - u_apply, -rate, rate)
             u_apply = np.clip(u_apply + du, low, high)
-
             step += 1
             return u_apply.astype(np.float64, copy=False)
 
@@ -412,25 +366,15 @@ def run_episode_for_genotype(body_geno, duration: int = SIM_DURATION, mode: Lite
     episode_cb = _episode_controller()
     ctrl = Controller(controller_callback_function=episode_cb, tracker=tracker)
 
-    # Bind tracker
     if ctrl.tracker is not None:
         ctrl.tracker.setup(world.spec, data)
 
-    # Record start XY for fallback displacement
-    start_xy = np.array(data.body(track_body).xpos[:2], dtype=float).copy()
+    mj.set_mjcb_control(lambda m, d: ctrl.set_control(m, d))
 
-    # Set callback
-    args: list[Any] = []
-    kwargs: dict[str, Any] = {}
-    mj.set_mjcb_control(lambda m, d: ctrl.set_control(m, d, *args, **kwargs))
+    # Run headless
+    simple_runner(model, data, duration=duration)
 
-    # Run
-    if mode == "simple":
-        simple_runner(model, data, duration=duration)
-    else:
-        simple_runner(model, data, duration=duration)
-
-    # Preferred: tracker history; fallback: body position delta
+    # Prefer tracker history. If absent, fall back to absolute pose delta.
     hist = tracker.history.get("xpos", [[]])
     if (
         hist is None
@@ -439,7 +383,7 @@ def run_episode_for_genotype(body_geno, duration: int = SIM_DURATION, mode: Lite
         or not isinstance(hist[0], (list, tuple, np.ndarray))
     ):
         end_xy = np.array(data.body(track_body).xpos[:2], dtype=float)
-        start3 = [start_xy[0], start_xy[1], 0.0]
+        start3 = [float(start_xy[0]), float(start_xy[1]), 0.0]
         end3 = [float(end_xy[0]), float(end_xy[1]), 0.0]
         hist = [start3, end3]
 
@@ -455,24 +399,6 @@ def render_snapshot(world, data, save_path: str | None = None):
         with open(save_path, "wb") as f:
             f.write(img)
     return img
-
-
-def show_xpos_history(history_xyz: list[list[float]], save_path: str | None = None) -> None:
-    camera = mj.MjvCamera()
-    camera.type = mj.mjtCamera.mjCAMERA_FREE
-    camera.lookat = [2.5, 0, 0]
-    camera.distance = 10
-    camera.azimuth = 0
-    camera.elevation = -90
-
-    mj.set_mjcb_control(None)
-    world = OlympicArena()
-    model = world.spec.compile()
-    data = mj.MjData(model)
-    img = single_frame_renderer(world.spec, data, width=640, height=480)
-    if save_path:
-        with open(save_path, "wb") as f:
-            f.write(img)
 
 # =========================
 # DEAP scaffolding
