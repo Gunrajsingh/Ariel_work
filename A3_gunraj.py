@@ -297,6 +297,9 @@ def run_episode_for_genotype(body_geno, duration: int = SIM_DURATION, mode: Lite
     mj.mj_resetData(model, data)
     mj.mj_forward(model, data)
 
+    if model.nu == 0 or model.nv == 0 or model.nbody < 2:
+        return -1e6, [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]], built.decoded_graph
+
     track_body = _choose_track_body(model)
     tracker = Tracker(mujoco_obj_to_find=mj.mjtObj.mjOBJ_BODY, name_to_bind=track_body)
 
@@ -506,6 +509,7 @@ def run_ea():
 
     pop = toolbox.population(n=POP_SIZE)
 
+    # Evaluate initial population
     invalid = [ind for ind in pop if not ind.fitness.valid]
     for ind in invalid:
         ind.fitness.values = toolbox.evaluate(ind)
@@ -519,27 +523,30 @@ def run_ea():
     no_improve = 0
     best_so_far = best_per_gen[-1]
 
+    # ----- Render/init snapshot of gen 0 best -----
     best0 = tools.selBest(pop, 1)[0]
     built0 = build_body(best0[0], nde_modules=NUM_OF_MODULES, rng=RNG)
     save_body_artifacts(DATA, built0, tag="gen_000_best")
     try:
         world0 = OlympicArena()
         world0.spawn(built0.mjspec.spec, position=SPAWN_POS)
-        m0 = world0.spec.compile()
-        d0 = mj.MjData(m0)
-        render_snapshot(world0, d0, save_path=str(DATA / "gen_000_best.png"))
+        # helper compiles model & renders internally
+        render_snapshot(world0, save_path=str(DATA / "gen_000_best.png"))
     except Exception as e:
         console.log(f"[Render init] {e}")
 
     t_wall = time.time()
-    for gen in range(1, N_GEN + 1):
-        offspring = toolbox.select(pop, len(pop))
-        offspring = list(map(toolbox.clone, offspring))
 
+    for gen in range(1, N_GEN + 1):
+        # Selection + cloning
+        offspring = list(map(toolbox.clone, toolbox.select(pop, len(pop))))
+
+        # Crossover
         for c1, c2 in zip(offspring[::2], offspring[1::2]):
             if random.random() < CXPB:
                 toolbox.mate(c1, c2)
 
+        # Adaptive mutation
         adapt_mutpb = MUTPB
         if no_improve >= STAGNATION_STEPS[0]:
             adapt_mutpb = min(1.0, MUTPB * MUTPB_BOOSTS[0])
@@ -550,21 +557,24 @@ def run_ea():
             if random.random() < adapt_mutpb:
                 toolbox.mutate(m)
 
+        # Random immigrants
         n_imm = max(0, int(IMM_FRAC * len(offspring)))
         for _ in range(n_imm):
-            idx = random.randrange(len(offspring))
-            offspring[idx] = toolbox.individual()
+            offspring[random.randrange(len(offspring))] = toolbox.individual()
 
+        # Evaluate
         invalid = [ind for ind in offspring if not ind.fitness.valid]
         for ind in invalid:
             ind.fitness.values = toolbox.evaluate(ind)
 
+        # Elitism
         hof.update(offspring)
         elites = list(map(toolbox.clone, hof.items))
 
         offspring.sort(key=lambda ind: ind.fitness.values[0], reverse=True)
         pop = elites + offspring[: max(0, POP_SIZE - len(elites))]
 
+        # Logging
         best = tools.selBest(pop, 1)[0]
         best_per_gen.append(best.fitness.values[0])
 
@@ -576,21 +586,24 @@ def run_ea():
 
         dt_wall = time.time() - t_wall
         console.log(
-            f"[EA] Gen {gen:3d} | best = {best.fitness.values[0]:.4f} | no_improve={no_improve:2d} | t={dt_wall:.1f}s"
+            f"[EA] Gen {gen:3d} | best = {best.fitness.values[0]:.4f} | "
+            f"no_improve={no_improve:2d} | t={dt_wall:.1f}s"
         )
 
+        # Save artifacts + per-gen snapshot
         built = build_body(best[0], nde_modules=NUM_OF_MODULES, rng=RNG)
-        save_body_artifacts(DATA, built, tag=f"gen_{gen:03d}_best")
+        tag = f"gen_{gen:03d}_best"
+        save_body_artifacts(DATA, built, tag=tag)
 
         try:
             world_g = OlympicArena()
             world_g.spawn(built.mjspec.spec, position=SPAWN_POS)
-            mg = world_g.spec.compile()
-            dg = mj.MjData(mg)
-            render_snapshot(world_g, dg, save_path=str(DATA / f"gen_{gen:03d}_best.png"))
+            # helper compiles model & renders internally
+            render_snapshot(world_g, save_path=str(DATA / f"{tag}.png"))
         except Exception as e:
             console.log(f"[Render gen {gen}] {e}")
 
+    # Plot curve
     try:
         import matplotlib.pyplot as plt
 

@@ -351,7 +351,7 @@ def run_episode_for_genotype(
     world = OlympicArena()
     built = build_body(body_geno, nde_modules=NUM_OF_MODULES)
 
-    world.spawn(built.mjspec.spec, spawn_position=SPAWN_POS)
+    world.spawn(built.mjspec.spec, position=SPAWN_POS)
     model = world.spec.compile()
     data = mj.MjData(model)
     mj.mj_resetData(model, data)
@@ -495,7 +495,7 @@ def run_ea():
     save_body_artifacts(DATA, built0, tag0)
     try:
         world0 = OlympicArena()
-        world0.spawn(built0.mjspec.spec, spawn_position=SPAWN_POS)
+        world0.spawn(built0.mjspec.spec, position=SPAWN_POS)
         m0 = world0.spec.compile(); d0 = mj.MjData(m0)
         render_snapshot(m0, d0, save_path=str(DATA / f"{tag0}.png"))
     except Exception as e:
@@ -561,7 +561,7 @@ def run_ea():
         try:
             # render static snapshot
             world_g = OlympicArena()
-            world_g.spawn(built.mjspec.spec, spawn_position=SPAWN_POS)
+            world_g.spawn(built.mjspec.spec, position=SPAWN_POS)
             mg = world_g.spec.compile(); dg = mj.MjData(mg)
             render_snapshot(mg, dg, save_path=str(DATA / f"{tag}.png"))
         except Exception as e:
