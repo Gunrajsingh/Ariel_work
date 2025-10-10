@@ -1,0 +1,39 @@
+:py:mod:`compile_terrains`
+========================================================
+
+.. py:module:: ariel.simulation.environments.compile_terrains
+
+.. autoapi-nested-parse::
+
+   Compile all terrains to XML files.
+
+
+
+Module Contents
+---------------
+
+
+Functions
+~~~~~~~~~
+
+.. autoapisummary::
+
+   ariel.simulation.environments.compile_terrains.main
+
+
+
+Attributes
+~~~~~~~~~~
+
+.. autoapisummary::
+
+   ariel.simulation.environments.compile_terrains.console
+
+
+.. py:data:: console
+
+.. py:function:: main() -> None
+
+   Entry point.
+
+

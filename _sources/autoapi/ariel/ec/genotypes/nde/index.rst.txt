@@ -1,0 +1,86 @@
+:py:mod:`nde`
+================================
+
+.. py:module:: ariel.ec.genotypes.nde
+
+.. autoapi-nested-parse::
+
+   Neural developmental encodings.
+
+
+
+Submodules
+----------
+.. toctree::
+   :titlesonly:
+   :maxdepth: 1
+
+   nde/index.rst
+
+
+Package Contents
+----------------
+
+Classes
+~~~~~~~
+
+.. autoapisummary::
+
+   ariel.ec.genotypes.nde.NeuralDevelopmentalEncoding
+
+
+
+
+.. py:class:: NeuralDevelopmentalEncoding(number_of_modules: int)
+
+   Bases: :py:obj:`torch.nn.Module`
+
+   .. autoapi-inheritance-diagram:: ariel.ec.genotypes.nde.NeuralDevelopmentalEncoding
+      :parts: 1
+
+
+   .. py:attribute:: fc1
+
+
+   .. py:attribute:: fc2
+
+
+   .. py:attribute:: fc3
+
+
+   .. py:attribute:: fc4
+
+
+   .. py:attribute:: type_p_shape
+
+
+   .. py:attribute:: type_p_out
+
+
+   .. py:attribute:: conn_p_shape
+
+
+   .. py:attribute:: conn_p_out
+
+
+   .. py:attribute:: rot_p_shape
+
+
+   .. py:attribute:: rot_p_out
+
+
+   .. py:attribute:: output_layers
+
+
+   .. py:attribute:: output_shapes
+
+
+   .. py:attribute:: relu
+
+
+   .. py:attribute:: sigmoid
+
+
+   .. py:method:: forward(genotype: list[numpy.typing.NDArray[numpy.float32]]) -> list[numpy.typing.NDArray[numpy.float32]]
+
+
