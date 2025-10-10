@@ -1,23 +1,23 @@
 """
-Assignment 3 — Robot Olympics (co-evolution with DETERMINISTIC body analysis)
+Assignment 3 — Robot Olympics (co-evolution with DISTANCE-FOCUSED FITNESS)
 
-CRITICAL FIX:
-- The issue was that the same body genotype was producing different architectures 
-  when built multiple times due to stochastic elements in the NDE process
-- This caused dimension mismatches between controller analysis and actual use
-- Solution: Build the body ONCE, cache its architecture, and reuse for all controller evaluations
+This version implements a GOAL-ORIENTED fitness function that strongly motivates robots
+to reach the end of the course at position [5, 0, 0.5].
 
-APPROACH:
-- Deterministic body analysis with caching
-- More conservative controller evolution (larger population, more generations)
-- Focus on getting stable, working solutions rather than optimal ones
-- Simplified architecture with robust fallbacks
+DISTANCE-FOCUSED FITNESS IMPROVEMENTS:
+1. Primary reward: Distance toward goal (exponentially increasing)
+2. Progress reward: Incremental reward for each meter forward
+3. Speed bonus: Reward for reaching goal faster
+4. Minimum movement requirement: Penalty for staying stationary
+5. Simple but effective: Focus purely on forward locomotion performance
+
+GOAL: Make robots travel from [-0.8, 0, 0.1] to [5, 0, 0.5] = 5.8 meters forward
 
 PARAMETERS:
-- Body: 12 population × 6 generations (smaller, more focused)  
-- Controller: 10 population × 6 generations (more thorough)
-- Simulation: 8 seconds each (good evaluation time)
-- Estimated total runtime: ~3-4 hours
+- Body: 12 population × 6 generations (focused)  
+- Controller: 12 population × 8 generations (thorough training)
+- Simulation: 15 seconds each (more time to reach goal)
+- Estimated total runtime: ~5-6 hours
 """
 
 from __future__ import annotations
@@ -54,9 +54,9 @@ from ariel.utils.tracker import Tracker
 console = Console()
 
 # =========================
-# Global settings - CONSERVATIVE BUT RELIABLE
+# Global settings - GOAL-FOCUSED
 # =========================
-SCRIPT_NAME = "A3_co_evolution_stable"
+SCRIPT_NAME = "A3_co_evolution_goal_focused"
 CWD = Path(".").resolve()
 DATA = CWD / "__data__" / SCRIPT_NAME
 DATA.mkdir(parents=True, exist_ok=True)
@@ -64,48 +64,147 @@ DATA.mkdir(parents=True, exist_ok=True)
 SEED = 42
 RNG = np.random.default_rng(SEED)
 
-# EA parameters - Conservative for reliability
-BODY_POP_SIZE = 12  # Smaller population, more focused
-BODY_N_GEN = 6      # Fewer generations, better solutions
+# EA parameters - Body evolution (focused)
+BODY_POP_SIZE = 12  
+BODY_N_GEN = 6      
 BODY_TOURNSIZE = 3
 BODY_CXPB = 0.7
-BODY_MUTPB = 0.15
+BODY_MUTPB = 0.18   
 BODY_SBX_ETA = 20.0
-BODY_IMM_FRAC = 0.20
+BODY_IMM_FRAC = 0.25  
 BODY_STAGNATION_STEPS = (3, 5)
 BODY_MUTPB_BOOSTS = (1.8, 2.5)
 
-# Controller EA - More thorough evolution per body
-CTRL_POP_SIZE = 10  # Larger population for better search
-CTRL_N_GEN = 6      # More generations for better controllers
+# Controller EA - FOCUSED ON PERFORMANCE
+CTRL_POP_SIZE = 12  
+CTRL_N_GEN = 8      
 CTRL_TOURNSIZE = 3
 CTRL_CXPB = 0.8
-CTRL_MUTPB = 0.2
+CTRL_MUTPB = 0.25   
 CTRL_SBX_ETA = 15.0
 CTRL_IMM_FRAC = 0.20
 
-# Sim + environment - Good evaluation time
-SIM_DURATION = 8     # Longer evaluation for stability
-RATE_LIMIT_DU = 0.025
+# Sim + environment - GOAL-ORIENTED
+SIM_DURATION = 15    # MORE TIME to reach the goal
+RATE_LIMIT_DU = 0.05  # Even more aggressive control for speed
 HINGE_LIMIT = math.pi / 2
-WARMUP_STEPS = int(0.4 * 240)  # Good warmup time
+WARMUP_STEPS = int(0.2 * 240)  # Even shorter warmup for quick action
 HARD_TIMEOUT = 15
-SPAWN_POS = [-0.8, 0, 0.1]
-TARGET_POSITION = [5, 0, 0.5]
+SPAWN_POS = [-0.8, 0, 0.1]  # Start position
+TARGET_POSITION = [5, 0, 0.5]  # GOAL POSITION - 5.8 meters forward!
 
 # Body encoding
 BODY_L = 64
 NUM_OF_MODULES = 30
 
-# Controller encoding - Conservative
-CTRL_HIDDEN = 10    # Smaller network for stability
-CTRL_W_LOW, CTRL_W_HIGH = -1.5, 1.5  # Conservative bounds
+# Controller encoding - High capacity for complex behaviors
+CTRL_HIDDEN = 16    
+CTRL_W_LOW, CTRL_W_HIGH = -2.5, 2.5  # Even less conservative for dynamic movement
 
 # Plot outputs
 EA_FITNESS_PNG = DATA / "ea_best_over_generations.png"
 
 # =========================
-# Body architecture caching system
+# GOAL-FOCUSED FITNESS FUNCTION
+# =========================
+def compute_goal_focused_fitness(start_pos, end_pos, history, duration):
+    """
+    Goal-focused fitness that strongly rewards progress toward target [5, 0, 0.5].
+    
+    The course is: from [-0.8, 0, 0.1] to [5, 0, 0.5] = 5.8 meters forward
+    
+    Components (in order of importance):
+    1. DISTANCE PROGRESS: Exponentially increasing reward for forward progress
+    2. GOAL ACHIEVEMENT: Massive bonus for reaching near the goal
+    3. SPEED BONUS: Extra reward for reaching goal quickly
+    4. MOVEMENT REQUIREMENT: Penalty for barely moving
+    5. SURVIVAL: Small penalty for falling/instability only if it prevents progress
+    """
+    
+    # Calculate forward progress (x-direction is primary)
+    start_x = float(start_pos[0])  # Should be around -0.8
+    end_x = float(end_pos[0])
+    goal_x = TARGET_POSITION[0]  # 5.0
+    
+    # Forward distance covered
+    forward_distance = end_x - start_x
+    
+    # Distance to goal (how close are we to the finish line?)
+    distance_to_goal = goal_x - end_x  # Positive = still need to go forward
+    
+    # 1. EXPONENTIAL PROGRESS REWARD - This is the main driver
+    # We want MASSIVE rewards for each additional meter forward
+    if forward_distance > 0:
+        # Exponential reward: 1m = 1 point, 2m = 4 points, 3m = 9 points, etc.
+        progress_reward = forward_distance * forward_distance
+        # Additional linear component for consistent progress
+        progress_reward += 2.0 * forward_distance
+    else:
+        # Heavy penalty for moving backward
+        progress_reward = 3.0 * forward_distance  # Amplify backward penalty
+    
+    # 2. GOAL ACHIEVEMENT BONUS - Massive bonus for getting close to target
+    if distance_to_goal <= 0:
+        # REACHED OR PASSED THE GOAL! 
+        goal_bonus = 50.0 + max(0, -distance_to_goal * 5.0)  # Extra bonus for going past
+    elif distance_to_goal <= 1.0:
+        # Very close to goal
+        goal_bonus = 30.0 * (1.0 - distance_to_goal)  # Up to 30 points for being within 1m
+    elif distance_to_goal <= 2.0:  
+        # Close to goal
+        goal_bonus = 10.0 * (2.0 - distance_to_goal)  # Up to 10 points for being within 2m
+    else:
+        goal_bonus = 0.0
+    
+    # 3. SPEED BONUS - Reward for reaching goal faster
+    if distance_to_goal <= 1.0:  # Only give speed bonus if robot is near goal
+        # More time remaining = higher speed bonus
+        time_efficiency = max(0, (duration - time.time() if hasattr(time, 'time') else duration * 0.3))
+        speed_bonus = min(5.0, time_efficiency * 0.5)
+    else:
+        speed_bonus = 0.0
+    
+    # 4. MINIMUM MOVEMENT REQUIREMENT - Prevent robots from just standing
+    total_distance_traveled = 0.0
+    if len(history) >= 2:
+        for i in range(1, len(history)):
+            if len(history[i]) >= 3 and len(history[i-1]) >= 3:
+                dx = history[i][0] - history[i-1][0]
+                dy = history[i][1] - history[i-1][1]
+                total_distance_traveled += np.sqrt(dx*dx + dy*dy)
+    
+    # Require at least some movement - penalty for being stationary
+    if total_distance_traveled < 0.1:
+        movement_penalty = -2.0  # Penalty for barely moving
+    else:
+        movement_penalty = 0.0
+    
+    # 5. BASIC SURVIVAL CHECK - Only penalize if robot completely fails
+    final_height = float(end_pos[2])
+    if final_height < -0.5:  # Robot completely fell through floor
+        survival_penalty = -5.0
+    else:
+        survival_penalty = 0.0
+    
+    # COMBINE ALL COMPONENTS - Heavily weighted toward distance progress
+    total_fitness = (
+        progress_reward +      # PRIMARY: Quadratic + linear progress reward
+        goal_bonus +          # SECONDARY: Massive bonus near goal  
+        speed_bonus +         # TERTIARY: Speed efficiency
+        movement_penalty +    # CONSTRAINT: Must move  
+        survival_penalty      # CONSTRAINT: Must not completely fail
+    )
+    
+    # Log promising individuals with detailed breakdown
+    if total_fitness > 0.5 or forward_distance > 0.5:
+        console.log(f"[Goal-Focused] fwd_dist={forward_distance:.3f}m, to_goal={distance_to_goal:.3f}m, "
+                   f"prog_rew={progress_reward:.2f}, goal_bon={goal_bonus:.2f}, "
+                   f"total={total_fitness:.2f} | POS: {end_x:.3f}")
+    
+    return total_fitness
+
+# =========================
+# Body architecture caching system (unchanged)
 # =========================
 @dataclass
 class BodyArchitecture:
@@ -114,24 +213,19 @@ class BodyArchitecture:
     out_size: int 
     viable: bool
     error_msg: str
-    world: Optional[Any] = None  # Keep world for reuse
-    model: Optional[Any] = None  # Keep model for reuse
+    world: Optional[Any] = None
+    model: Optional[Any] = None
     track_body_name: Optional[str] = None
 
 # Global cache for body architectures
 _BODY_ARCH_CACHE = {}
 
 def get_body_architecture(body_geno_key: str, body_geno) -> BodyArchitecture:
-    """
-    Get or create cached body architecture information.
-    This ensures the same genotype always produces the same architecture.
-    """
+    """Get or create cached body architecture information."""
     if body_geno_key in _BODY_ARCH_CACHE:
         return _BODY_ARCH_CACHE[body_geno_key]
     
-    # Build body deterministically
     try:
-        # Use fixed random seed for deterministic building
         temp_rng = np.random.default_rng(hash(body_geno_key) % 2**32)
         
         world = OlympicArena()
@@ -146,42 +240,42 @@ def get_body_architecture(body_geno_key: str, body_geno) -> BodyArchitecture:
         model = world.spec.compile()
         data = mj.MjData(model)
         
-        # Reset and check
         mj.mj_resetData(model, data)
         mj.mj_forward(model, data)
         
-        # Check basic viability
         if model.nu == 0 or model.nv == 0 or model.nbody < 2:
             arch = BodyArchitecture(0, 0, False, f"Invalid model: nu={model.nu}, nv={model.nv}, nbody={model.nbody}")
             _BODY_ARCH_CACHE[body_geno_key] = arch
             return arch
         
-        # Find core body
         track_body_name = _find_core_body_name(model)
         if not track_body_name:
             arch = BodyArchitecture(0, 0, False, "No core body found")
             _BODY_ARCH_CACHE[body_geno_key] = arch
             return arch
         
-        # Check if robot is reasonable
         try:
             core_body = data.body(track_body_name)
-            if core_body.xpos[2] < -0.5:
-                arch = BodyArchitecture(0, 0, False, "Robot below ground")
+            start_height = core_body.xpos[2]
+            if start_height < -0.2:
+                arch = BodyArchitecture(0, 0, False, f"Robot starts too low: {start_height:.3f}")
                 _BODY_ARCH_CACHE[body_geno_key] = arch
+                return arch
+            if start_height > 2.0:
+                arch = BodyArchitecture(0, 0, False, f"Robot starts too high: {start_height:.3f}")
+                _BODY_ARCH_CACHE[body_geno_key] = arch  
                 return arch
         except Exception as e:
             arch = BodyArchitecture(0, 0, False, f"Cannot access core body: {e}")
             _BODY_ARCH_CACHE[body_geno_key] = arch
             return arch
         
-        # Calculate controller dimensions
-        inp_size = len(data.qpos) + len(data.qvel) + 3  # qpos + qvel + time features
+        inp_size = len(data.qpos) + len(data.qvel) + 3
         out_size = model.nu
         
         arch = BodyArchitecture(inp_size, out_size, True, "OK", world, model, track_body_name)
         _BODY_ARCH_CACHE[body_geno_key] = arch
-        console.log(f"[Architecture] Cached body: inp={inp_size}, out={out_size}, joints={len(data.qpos)}, actuators={out_size}")
+        console.log(f"[Architecture] Cached viable body: inp={inp_size}, out={out_size}, height={start_height:.3f}")
         return arch
         
     except Exception as e:
@@ -192,18 +286,15 @@ def get_body_architecture(body_geno_key: str, body_geno) -> BodyArchitecture:
 def body_geno_to_key(body_geno) -> str:
     """Convert body genotype to a hashable cache key."""
     t, c, r = body_geno
-    # Create a deterministic hash from the genotype arrays
     combined = np.concatenate([t.flatten(), c.flatten(), r.flatten()])
     return str(hash(combined.tobytes()))
 
 def _find_core_body_name(model):
     """Find the core body, with robust fallback."""
-    # Try robot-core first
     bid = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, "robot-core")
     if bid != -1:
         return "robot-core"
     
-    # Look for any body with 'core' in name
     candidates = []
     for bid in range(model.nbody):
         name = mj.mj_id2name(model, mj.mjtObj.mjOBJ_BODY, bid)
@@ -216,7 +307,6 @@ def _find_core_body_name(model):
         candidates.sort(key=len)
         return candidates[0]
     
-    # Fallback: first non-world body
     for bid in range(model.nbody):
         name = mj.mj_id2name(model, mj.mjtObj.mjOBJ_BODY, bid)
         if name and "world" not in name.lower():
@@ -225,7 +315,7 @@ def _find_core_body_name(model):
     return None
 
 # =========================
-# Controller genome and operators - DETERMINISTIC
+# Controller genome and operators - AGGRESSIVE SETTINGS
 # =========================
 def controller_theta_size(inp, hidden=CTRL_HIDDEN, out_dim=1):
     """Calculate size of flattened NN weights vector."""
@@ -257,19 +347,50 @@ def controller_mlp_forward(x, params):
         W1, b1, W2, b2, W3, b3 = params
         h1 = np.tanh(x @ W1 + b1)
         h2 = np.tanh(h1 @ W2 + b2)
-        y = np.tanh(h2 @ W3 + b3)  # [-1, 1]
+        y = np.tanh(h2 @ W3 + b3)
         return y
     except Exception as e:
         console.log(f"[MLP Error] {e}")
         return np.zeros(1)
 
 def init_controller_genotype_for_body(inp_size, out_size, rng: np.random.Generator):
-    """Initialize random controller weights for specific body dimensions."""
+    """Initialize controller weights for AGGRESSIVE LOCOMOTION."""
     w_size = controller_theta_size(inp_size, CTRL_HIDDEN, out_size)
     
-    # Xavier initialization with conservative scaling
-    scale = np.sqrt(1.0 / inp_size)  # Conservative initialization
-    theta = rng.normal(0.0, scale, size=w_size).astype(float)
+    # More aggressive initialization for dynamic movement
+    w1_scale = np.sqrt(3.0 / (inp_size + CTRL_HIDDEN))  # Slightly larger
+    w2_scale = np.sqrt(3.0 / (CTRL_HIDDEN + CTRL_HIDDEN))  
+    w3_scale = np.sqrt(2.0 / (CTRL_HIDDEN + out_size))
+    
+    theta = np.zeros(w_size, dtype=float)
+    i = 0
+    
+    # W1 weights - More variation for diverse behaviors
+    n_w1 = inp_size * CTRL_HIDDEN
+    theta[i:i+n_w1] = rng.normal(0.0, w1_scale, size=n_w1)
+    i += n_w1
+    
+    # b1 biases - Small positive bias to encourage activation
+    theta[i:i+CTRL_HIDDEN] = rng.normal(0.1, 0.1, size=CTRL_HIDDEN)  # Higher variance
+    i += CTRL_HIDDEN
+    
+    # W2 weights
+    n_w2 = CTRL_HIDDEN * CTRL_HIDDEN  
+    theta[i:i+n_w2] = rng.normal(0.0, w2_scale, size=n_w2)
+    i += n_w2
+    
+    # b2 biases
+    theta[i:i+CTRL_HIDDEN] = rng.normal(0.05, 0.1, size=CTRL_HIDDEN)
+    i += CTRL_HIDDEN
+    
+    # W3 weights - Output layer
+    n_w3 = CTRL_HIDDEN * out_size
+    theta[i:i+n_w3] = rng.normal(0.0, w3_scale, size=n_w3)
+    i += n_w3
+    
+    # b3 biases - Small bias toward forward movement
+    theta[i:i+out_size] = rng.normal(0.02, 0.05, size=out_size)  # Slight forward bias
+    
     theta = np.clip(theta, CTRL_W_LOW, CTRL_W_HIGH)
     
     return theta
@@ -301,8 +422,8 @@ def controller_sbx_crossover(parent1, parent2, eta=CTRL_SBX_ETA, rng=None):
     
     return child1, child2
 
-def controller_polynomial_mutation(individual, eta=20.0, indpb=0.1, rng=None):
-    """Polynomial bounded mutation for controller weights."""
+def controller_polynomial_mutation(individual, eta=12.0, indpb=0.15, rng=None):
+    """Polynomial mutation with AGGRESSIVE parameters for exploration."""
     if rng is None:
         rng = np.random.default_rng()
     
@@ -315,7 +436,6 @@ def controller_polynomial_mutation(individual, eta=20.0, indpb=0.1, rng=None):
             delta_1 = (individual[i] - CTRL_W_LOW) / (CTRL_W_HIGH - CTRL_W_LOW)
             delta_2 = (CTRL_W_HIGH - individual[i]) / (CTRL_W_HIGH - CTRL_W_LOW)
             
-            # Clamp deltas to valid range
             delta_1 = np.clip(delta_1, 1e-8, 1.0 - 1e-8)
             delta_2 = np.clip(delta_2, 1e-8, 1.0 - 1e-8)
             
@@ -332,7 +452,7 @@ def controller_polynomial_mutation(individual, eta=20.0, indpb=0.1, rng=None):
     return mutated
 
 # =========================
-# Body genotype and operators
+# Body genotype and operators (unchanged)
 # =========================
 def init_body_genotype(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     t = rng.random(n).astype(np.float32)
@@ -364,7 +484,7 @@ def sbx_body(
 
 def block_mutation(
     g: tuple[np.ndarray, np.ndarray, np.ndarray],
-    indpb: float = 1.5 / BODY_L,  # Conservative mutation rate
+    indpb: float = 2.5 / BODY_L,  # Slightly higher for more exploration
     rng: np.random.Generator | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     rng = rng or np.random.default_rng()
@@ -381,7 +501,7 @@ def block_mutation(
     return (t, c, r)
 
 # =========================
-# Body building
+# Body building (unchanged)
 # =========================
 @dataclass
 class BuiltBody:
@@ -413,7 +533,6 @@ def build_body(geno: tuple[np.ndarray, np.ndarray, np.ndarray], nde_modules: int
         return BuiltBody(nde=nde, decoded_graph=graph, mjspec=spec, viable=True, error_msg="OK")
         
     except Exception as e:
-        # Return a placeholder for failed builds
         dummy_nde = NeuralDevelopmentalEncoding(number_of_modules=1)
         return BuiltBody(nde=dummy_nde, decoded_graph=None, mjspec=None, viable=False, error_msg=str(e))
 
@@ -442,46 +561,36 @@ def save_body_artifacts(run_dir: Path, built: BuiltBody, tag: str):
         console.log(f"[Save Error] {e}")
 
 # =========================
-# Episode evaluation - USING CACHED ARCHITECTURE
+# Episode evaluation - GOAL-FOCUSED FITNESS
 # =========================
 def run_episode_with_controller(body_geno_key: str, controller_theta, duration: int = SIM_DURATION):
-    """
-    Run episode using cached body architecture.
-    This ensures consistent dimensions throughout.
-    """
+    """Run episode with GOAL-FOCUSED FITNESS FUNCTION."""
     try:
-        # Get cached architecture
         arch = _BODY_ARCH_CACHE.get(body_geno_key)
         if not arch or not arch.viable:
             return -1e6, [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
         
-        # Use the cached world and model
         world = arch.world
         model = arch.model
         track_body_name = arch.track_body_name
         
-        # Create fresh data
         data = mj.MjData(model)
         mj.mj_resetData(model, data)
         mj.mj_forward(model, data)
         
-        # Reset MuJoCo callback
         mj.set_mjcb_control(None)
         
-        # Set up tracker
         tracker = Tracker(mujoco_obj_to_find=mj.mjtObj.mjOBJ_BODY, name_to_bind=track_body_name)
         
-        # Record start position
         start_pos = np.array(data.body(track_body_name).xpos[:3], dtype=float).copy()
         
-        # Unpack controller with cached dimensions
         controller_params = unpack_controller_theta(controller_theta, arch.inp_size, CTRL_HIDDEN, arch.out_size)
         if controller_params is None:
             return -1e6, [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
         
         def _episode_controller():
             step = 0
-            # Setup control bounds
+            # VERY AGGRESSIVE CONTROL for fast movement
             ctrlrange = np.asarray(model.actuator_ctrlrange, dtype=float).reshape(arch.out_size, 2)
             low = ctrlrange[:, 0].copy()
             high = ctrlrange[:, 1].copy()
@@ -492,7 +601,7 @@ def run_episode_with_controller(body_geno_key: str, controller_theta, duration: 
             center = 0.5 * (low + high)
             halfspan = 0.5 * (high - low)
             u_apply = center.copy()
-            base_rate = 0.02 * (high - low)
+            base_rate = 0.05 * (high - low)  # Very aggressive
             rate = np.minimum(base_rate, RATE_LIMIT_DU)
             
             def _cb(m: mj.MjModel, d: mj.MjData) -> npt.NDArray[np.float64]:
@@ -500,34 +609,27 @@ def run_episode_with_controller(body_geno_key: str, controller_theta, duration: 
                 try:
                     t_now = d.time
                     
-                    # Create input vector: qpos + qvel + time features
                     qpv = np.concatenate([d.qpos, d.qvel]).astype(float, copy=False)
                     time_features = np.array([t_now, math.sin(2 * math.pi * t_now), math.cos(2 * math.pi * t_now)], dtype=float)
                     x_in = np.concatenate([qpv, time_features])
                     
-                    # Verify input size matches cached architecture
                     if len(x_in) != arch.inp_size:
-                        console.log(f"[ERROR] Input size mismatch: {len(x_in)} != {arch.inp_size}")
                         return np.zeros(arch.out_size, dtype=np.float64)
                     
-                    # Forward pass through controller
                     y_out = controller_mlp_forward(x_in, controller_params)
                     y_out = y_out.flatten()
                     
-                    # Verify output size
                     if len(y_out) != arch.out_size:
-                        console.log(f"[ERROR] Output size mismatch: {len(y_out)} != {arch.out_size}")
                         y_out = np.resize(y_out, arch.out_size)
                     
-                    # Clean output
                     y_out = np.nan_to_num(y_out, nan=0.0, posinf=0.0, neginf=0.0)
                     u_target = center + halfspan * y_out
                     
-                    # Warm-up ramp
+                    # VERY SHORT WARMUP for immediate action
                     ramp = 1.0 if WARMUP_STEPS <= 0 else min(1.0, step / max(1, WARMUP_STEPS))
                     u_cmd = center + ramp * (u_target - center)
                     
-                    # Rate limiting
+                    # AGGRESSIVE RATE LIMITING
                     du = np.clip(u_cmd - u_apply, -rate, rate)
                     u_apply = np.clip(u_apply + du, low, high)
                     step += 1
@@ -548,37 +650,31 @@ def run_episode_with_controller(body_geno_key: str, controller_theta, duration: 
         
         mj.set_mjcb_control(lambda m, d: ctrl.set_control(m, d))
         
-        # Run simulation
+        # Run simulation for LONGER DURATION
         simple_runner(model, data, duration=duration)
         
-        # Get final position and compute displacement
         end_pos = np.array(data.body(track_body_name).xpos[:3], dtype=float)
         
-        # Get tracker history or fallback
         hist = tracker.history.get("xpos", [])
         if not hist or len(hist) < 2:
             hist = [start_pos.tolist(), end_pos.tolist()]
         
-        # Compute fitness as x-displacement
-        displacement = float(end_pos[0] - start_pos[0])
+        # GOAL-FOCUSED FITNESS CALCULATION
+        fitness = compute_goal_focused_fitness(start_pos, end_pos, hist, duration)
         
-        # Bound the fitness to reasonable values
-        displacement = np.clip(displacement, -10.0, 10.0)
+        fitness = np.clip(fitness, -100.0, 1000.0)  # Wider range for big rewards
         
-        return displacement, hist
+        return fitness, hist
         
     except Exception as e:
         console.log(f"[Episode Error] {e}")
         return -1e6, [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
 
 # =========================
-# Controller evolution - CACHED ARCHITECTURE
+# Controller evolution (unchanged logic)
 # =========================
 def evolve_controller_for_body(body_geno, verbose=False):
-    """
-    Evolve a controller for the given body using cached architecture.
-    """
-    # Get cache key and architecture
+    """Evolve a controller for the given body."""
     body_geno_key = body_geno_to_key(body_geno)
     arch = get_body_architecture(body_geno_key, body_geno)
     
@@ -590,7 +686,6 @@ def evolve_controller_for_body(body_geno, verbose=False):
     if verbose:
         console.log(f"[Controller EA] Body viable - inp:{arch.inp_size}, out:{arch.out_size}")
     
-    # Create DEAP types for controller evolution
     try:
         creator.ControllerFitnessMax
     except AttributeError:
@@ -600,19 +695,16 @@ def evolve_controller_for_body(body_geno, verbose=False):
     except AttributeError:
         creator.create("ControllerIndividual", list, fitness=creator.ControllerFitnessMax)
     
-    # Initialize controller population with correct dimensions
     def init_controller_individual():
         theta = init_controller_genotype_for_body(arch.inp_size, arch.out_size, RNG)
         return creator.ControllerIndividual(theta.tolist())
     
-    # Create population
     ctrl_pop = [init_controller_individual() for _ in range(CTRL_POP_SIZE)]
     
     if verbose:
         expected_size = controller_theta_size(arch.inp_size, CTRL_HIDDEN, arch.out_size)
         console.log(f"[Controller EA] Created population with theta size: {len(ctrl_pop[0])} (expected: {expected_size})")
     
-    # Evaluate initial population
     for ind in ctrl_pop:
         try:
             fitness, _ = run_episode_with_controller(body_geno_key, np.array(ind), SIM_DURATION)
@@ -622,18 +714,14 @@ def evolve_controller_for_body(body_geno, verbose=False):
                 console.log(f"[Controller EA] Initial eval error: {e}")
             ind.fitness.values = (-1e6,)
     
-    # Track best fitness
     best_fitness = max(ind.fitness.values[0] for ind in ctrl_pop)
     if verbose:
         console.log(f"[Controller EA] Initial best: {best_fitness:.4f}")
     
-    # Controller evolution loop
     for gen in range(CTRL_N_GEN):
-        # Selection
         offspring = tools.selTournament(ctrl_pop, len(ctrl_pop), tournsize=CTRL_TOURNSIZE)
         offspring = [creator.ControllerIndividual(ind[:]) for ind in offspring]
         
-        # Crossover
         for child1, child2 in zip(offspring[::2], offspring[1::2]):
             if random.random() < CTRL_CXPB:
                 try:
@@ -646,23 +734,20 @@ def evolve_controller_for_body(body_geno, verbose=False):
                     if verbose:
                         console.log(f"[Controller EA] Crossover error: {e}")
         
-        # Mutation
         for mutant in offspring:
             if random.random() < CTRL_MUTPB:
                 try:
-                    mutated = controller_polynomial_mutation(mutant, eta=20.0, indpb=0.1, rng=RNG)
+                    mutated = controller_polynomial_mutation(mutant, eta=12.0, indpb=0.15, rng=RNG)
                     mutant[:] = mutated.tolist()
                     del mutant.fitness.values
                 except Exception as e:
                     if verbose:
                         console.log(f"[Controller EA] Mutation error: {e}")
         
-        # Random immigrants with correct dimensions
         n_imm = max(0, int(CTRL_IMM_FRAC * len(offspring)))
         for _ in range(n_imm):
             offspring[random.randrange(len(offspring))] = init_controller_individual()
         
-        # Evaluate offspring
         for ind in offspring:
             if not hasattr(ind.fitness, 'values') or not ind.fitness.valid:
                 try:
@@ -673,17 +758,14 @@ def evolve_controller_for_body(body_geno, verbose=False):
                         console.log(f"[Controller EA] Eval error: {e}")
                     ind.fitness.values = (-1e6,)
         
-        # Replace population
         ctrl_pop = offspring
         
-        # Track progress
         gen_best = max(ind.fitness.values[0] for ind in ctrl_pop)
         if gen_best > best_fitness:
             best_fitness = gen_best
-            if verbose and gen_best > -1e6:
-                console.log(f"[Controller EA] Gen {gen}: IMPROVEMENT! best = {gen_best:.4f}")
+            if verbose and gen_best > 0.5:
+                console.log(f"[Controller EA] Gen {gen}: BREAKTHROUGH! best = {gen_best:.4f}")
     
-    # Return best controller and fitness
     best_ctrl = tools.selBest(ctrl_pop, 1)[0]
     final_fitness = best_ctrl.fitness.values[0]
     
@@ -693,7 +775,7 @@ def evolve_controller_for_body(body_geno, verbose=False):
     return np.array(best_ctrl), final_fitness
 
 # =========================
-# DEAP scaffolding for body evolution
+# DEAP scaffolding (unchanged)
 # =========================
 try:
     creator.BodyFitnessMax
@@ -727,7 +809,7 @@ def mate_bodies(ind1, ind2):
 
 def mutate_body(ind):
     g = ind[0]
-    ind[0] = block_mutation(g, indpb=1.5 / BODY_L, rng=RNG)
+    ind[0] = block_mutation(g, indpb=2.5 / BODY_L, rng=RNG)
     if hasattr(ind.fitness, "values"):
         del ind.fitness.values
     return (ind,)
@@ -736,18 +818,17 @@ toolbox.register("mate", mate_bodies)
 toolbox.register("mutate", mutate_body)
 
 def evaluate_body_individual(ind):
-    """Evaluate a body by evolving a cached controller for it."""
+    """Evaluate a body by evolving a goal-focused controller for it."""
     geno = ind[0]
     try:
         best_controller, fitness = evolve_controller_for_body(geno, verbose=False)
         if best_controller is None:
             return (-1e6,)
         
-        # Additional check: make sure fitness is reasonable
         if not np.isfinite(fitness):
             fitness = -1e6
         
-        fitness = float(np.clip(fitness, -1e6, 1e6))  # Bound fitness
+        fitness = float(np.clip(fitness, -1e6, 1e6))
         
         return (fitness,)
     except Exception as e:
@@ -769,7 +850,7 @@ def _hof_similar(a, b) -> bool:
 toolbox.register("select", tools.selTournament, tournsize=BODY_TOURNSIZE)
 
 # =========================
-# Rendering helpers
+# Rendering helpers (unchanged)
 # =========================
 def _topdown_camera() -> mj.MjvCamera:
     cam = mj.MjvCamera()
@@ -801,21 +882,20 @@ def render_snapshot(world, save_path: str | None = None):
         console.log(f"[Render Error] {e}")
 
 # =========================
-# Main EA loop - DETERMINISTIC
+# Main EA loop - GOAL FOCUSED
 # =========================
 def run_co_evolution():
     random.seed(SEED)
     np.random.seed(SEED)
     
-    console.log(f"[Co-Evolution] STABLE VERSION - Deterministic body architecture caching")
+    console.log(f"[Co-Evolution] GOAL-FOCUSED VERSION - Targeting position {TARGET_POSITION}")
+    console.log(f"[Co-Evolution] Course: {SPAWN_POS} → {TARGET_POSITION} = {TARGET_POSITION[0] - SPAWN_POS[0]:.1f}m forward")
     console.log(f"[Co-Evolution] Body: {BODY_POP_SIZE} pop × {BODY_N_GEN} gen")
     console.log(f"[Co-Evolution] Controller: {CTRL_POP_SIZE} pop × {CTRL_N_GEN} gen")
-    console.log(f"[Co-Evolution] Simulation: {SIM_DURATION}s each")
+    console.log(f"[Co-Evolution] Simulation: {SIM_DURATION}s each (goal-focused fitness)")
     
-    # Initialize body population
     body_pop = toolbox.population(n=BODY_POP_SIZE)
     
-    # Evaluate initial population with progress tracking
     console.log("[Co-Evolution] Evaluating initial population...")
     invalid = [ind for ind in body_pop if not ind.fitness.valid]
     
@@ -827,7 +907,10 @@ def run_co_evolution():
         
         if fitness_tuple[0] > -1e6:
             viable_count += 1
-            console.log(f"  -> Viable body found! Fitness: {fitness_tuple[0]:.4f}")
+            if fitness_tuple[0] > 1.0:
+                console.log(f"  -> PROMISING body found! Fitness: {fitness_tuple[0]:.4f}")
+            else:
+                console.log(f"  -> Viable body found! Fitness: {fitness_tuple[0]:.4f}")
     
     console.log(f"[Co-Evolution] Initial population: {viable_count}/{len(invalid)} viable bodies")
     console.log(f"[Co-Evolution] Architecture cache size: {len(_BODY_ARCH_CACHE)}")
@@ -843,7 +926,14 @@ def run_co_evolution():
     
     console.log(f"[Co-Evolution] Initial best fitness: {best_so_far:.4f}")
     
-    # Render/save snapshot of gen 0 best (if viable)
+    # Success thresholds
+    if best_so_far > 10.0:
+        console.log("🎉 AMAZING START! Robot shows strong forward progress!")
+    elif best_so_far > 2.0:
+        console.log("🚀 GREAT START! Robot shows forward movement!")
+    elif best_so_far > 0.5:
+        console.log("📈 GOOD START! Robot shows some forward progress!")
+    
     best0 = tools.selBest(body_pop, 1)[0]
     if best0.fitness.values[0] > -1e6:
         body_key = body_geno_to_key(best0[0])
@@ -859,19 +949,15 @@ def run_co_evolution():
     
     t_wall = time.time()
     
-    # Main evolution loop
     for gen in range(1, BODY_N_GEN + 1):
         console.log(f"[Co-Evolution] Generation {gen}/{BODY_N_GEN}")
         
-        # Selection + cloning
         offspring = list(map(toolbox.clone, toolbox.select(body_pop, len(body_pop))))
         
-        # Crossover
         for c1, c2 in zip(offspring[::2], offspring[1::2]):
             if random.random() < BODY_CXPB:
                 toolbox.mate(c1, c2)
         
-        # Adaptive mutation
         adapt_mutpb = BODY_MUTPB
         if no_improve >= BODY_STAGNATION_STEPS[0]:
             adapt_mutpb = min(1.0, BODY_MUTPB * BODY_MUTPB_BOOSTS[0])
@@ -884,15 +970,14 @@ def run_co_evolution():
             if random.random() < adapt_mutpb:
                 toolbox.mutate(m)
         
-        # Random immigrants
         n_imm = max(0, int(BODY_IMM_FRAC * len(offspring)))
         for _ in range(n_imm):
             offspring[random.randrange(len(offspring))] = toolbox.individual()
         
-        # Evaluate
         invalid = [ind for ind in offspring if not ind.fitness.valid]
         
         gen_viable_count = 0
+        promising_count = 0
         for i, ind in enumerate(invalid):
             console.log(f"[Co-Evolution] Gen {gen} - Evaluating body {i+1}/{len(invalid)}")
             fitness_tuple = toolbox.evaluate(ind)
@@ -900,27 +985,40 @@ def run_co_evolution():
             
             if fitness_tuple[0] > -1e6:
                 gen_viable_count += 1
-                console.log(f"  -> Viable! Fitness: {fitness_tuple[0]:.4f}")
+                if fitness_tuple[0] > 2.0:
+                    promising_count += 1
+                    console.log(f"  -> BREAKTHROUGH! Fitness: {fitness_tuple[0]:.4f}")
+                elif fitness_tuple[0] > 0.5:
+                    console.log(f"  -> Promising! Fitness: {fitness_tuple[0]:.4f}")
         
-        console.log(f"  -> Gen {gen}: {gen_viable_count}/{len(invalid)} viable offspring")
+        console.log(f"  -> Gen {gen}: {gen_viable_count}/{len(invalid)} viable offspring ({promising_count} promising)")
         console.log(f"  -> Architecture cache size: {len(_BODY_ARCH_CACHE)}")
         
-        # Elitism
         hof.update(offspring)
         elites = list(map(toolbox.clone, hof.items))
         
         offspring.sort(key=lambda ind: ind.fitness.values[0], reverse=True)
         body_pop = elites + offspring[: max(0, BODY_POP_SIZE - len(elites))]
         
-        # Logging
         best = tools.selBest(body_pop, 1)[0]
         best_per_gen.append(best.fitness.values[0])
         
         improvement = best.fitness.values[0] - best_so_far
-        if improvement > 1e-6:  # More lenient improvement threshold
+        if improvement > 0.1:  # Meaningful improvement threshold
             best_so_far = best.fitness.values[0]
             no_improve = 0
-            console.log(f"  -> IMPROVEMENT! +{improvement:.4f}")
+            console.log(f"  -> MAJOR IMPROVEMENT! +{improvement:.4f} | NEW BEST: {best_so_far:.4f}")
+            
+            # Distance analysis
+            if best_so_far > 50:
+                console.log("    🏆 GOAL ACHIEVED! Robot reached the target!")
+            elif best_so_far > 20:
+                console.log("    🚀 EXCELLENT! Robot moved several meters forward!")
+            elif best_so_far > 5:
+                console.log("    📈 GREAT! Robot shows strong forward movement!")
+            elif best_so_far > 1:
+                console.log("    ✅ GOOD! Robot moving in right direction!")
+                
         else:
             no_improve += 1
         
@@ -930,7 +1028,6 @@ def run_co_evolution():
             f"no_improve={no_improve:2d} | t={dt_wall:.1f}s"
         )
         
-        # Save artifacts + per-gen snapshot (if viable)
         if best.fitness.values[0] > -1e6:
             body_key = body_geno_to_key(best[0])
             arch = _BODY_ARCH_CACHE.get(body_key)
@@ -944,16 +1041,25 @@ def run_co_evolution():
                 except Exception as e:
                     console.log(f"[Render gen {gen}] {e}")
     
-    # Plot curve
+    # Plot results
     try:
         import matplotlib.pyplot as plt
         
-        plt.figure(figsize=(10, 6))
+        plt.figure(figsize=(12, 7))
         plt.plot(best_per_gen, marker="o", linewidth=2, markersize=6)
         plt.xlabel("Generation")
-        plt.ylabel("Best fitness (x-displacement)")
-        plt.title(f"Co-Evolution STABLE: Best fitness over {BODY_N_GEN} generations")
+        plt.ylabel("Best fitness (goal-focused)")
+        plt.title(f"Goal-Focused Co-Evolution: Progress toward target {TARGET_POSITION}")
         plt.grid(True, alpha=0.3)
+        
+        # Add reference lines for progress milestones
+        plt.axhline(y=0, color='red', linestyle='--', alpha=0.5, label='No movement')
+        plt.axhline(y=1, color='orange', linestyle='--', alpha=0.5, label='1m+ forward')
+        plt.axhline(y=5, color='blue', linestyle='--', alpha=0.5, label='Strong movement')
+        plt.axhline(y=20, color='green', linestyle='--', alpha=0.5, label='Major progress')
+        plt.axhline(y=50, color='purple', linestyle='--', alpha=0.5, label='Goal achieved!')
+        
+        plt.legend()
         plt.tight_layout()
         plt.savefig(EA_FITNESS_PNG, dpi=150)
         plt.close()
@@ -967,13 +1073,37 @@ def run_co_evolution():
 # Main
 # =========================
 def main():
-    console.log("[Co-Evolution] Starting STABLE co-evolution with deterministic caching...")
-    best, curve = run_co_evolution()
-    console.log(f"[Co-Evolution] Done. Best fitness = {best.fitness.values[0]:.4f}")
+    console.log("[Co-Evolution] Starting GOAL-FOCUSED co-evolution...")
+    console.log(f"[Co-Evolution] Target: Move {TARGET_POSITION[0] - SPAWN_POS[0]:.1f}m forward to reach {TARGET_POSITION}")
     
-    # Save final results
+    best, curve = run_co_evolution()
+    final_fitness = best.fitness.values[0]
+    
+    console.log(f"[Co-Evolution] Done. Best fitness = {final_fitness:.4f}")
+    
+    # Result analysis
+    if final_fitness > 50:
+        console.log("🏆 MISSION ACCOMPLISHED! Robot successfully reached the goal!")
+    elif final_fitness > 20:
+        console.log("🚀 EXCELLENT RESULT! Robot made major progress toward goal!")
+    elif final_fitness > 5:
+        console.log("📈 GREAT RESULT! Robot shows strong forward locomotion!")
+    elif final_fitness > 1:
+        console.log("✅ GOOD RESULT! Robot achieved forward movement!")
+    elif final_fitness > 0:
+        console.log("📊 PROGRESS! Robot shows some forward movement!")
+    else:
+        console.log("🔄 LEARNING! Robot needs more evolution to achieve forward movement!")
+    
+    # Calculate estimated distance
+    # Using rough approximation: fitness ≈ distance² + 2*distance for positive movement
+    if final_fitness > 0:
+        # Solve quadratic: x² + 2x - fitness = 0 → x = (-2 + √(4 + 4*fitness)) / 2
+        est_distance = (-2 + np.sqrt(4 + 4 * final_fitness)) / 2
+        console.log(f"[Co-Evolution] Estimated forward distance: {est_distance:.2f} meters")
+        console.log(f"[Co-Evolution] Progress: {100 * est_distance / 5.8:.1f}% toward goal")
+    
     if best.fitness.values[0] > -1e6:
-        # Evolve final controller for best body
         console.log("[Co-Evolution] Evolving final controller for best body...")
         best_controller, best_fitness = evolve_controller_for_body(best[0], verbose=True)
         
@@ -981,11 +1111,12 @@ def main():
             body_key = body_geno_to_key(best[0])
             arch = _BODY_ARCH_CACHE[body_key]
             
-            # Save the best controller
             controller_data = {
-                "controller_type": "mlp_co_evolved_stable",
+                "controller_type": "mlp_co_evolved_goal_focused",
                 "robot": "evolved_body",
                 "environment": "OlympicArena", 
+                "goal": f"Reach {TARGET_POSITION} from {SPAWN_POS}",
+                "target_distance": f"{TARGET_POSITION[0] - SPAWN_POS[0]:.1f}m",
                 "input_features": ["qpos", "qvel", "t", "sin(2πt)", "cos(2πt)"],
                 "architecture": {
                     "input_size": int(arch.inp_size),
@@ -996,11 +1127,24 @@ def main():
                 "theta_len": len(best_controller),
                 "theta": [float(x) for x in best_controller],
                 "final_fitness": float(best_fitness),
+                "fitness_description": "goal_focused (exponential progress + goal bonus + speed bonus)",
+                "optimizations_applied": [
+                    "Goal-focused fitness function",
+                    "Exponential progress rewards",
+                    "Longer simulation (15s)",
+                    "Aggressive control parameters",
+                    "Forward-biased initialization"
+                ],
                 "generations": {
                     "body_gens": BODY_N_GEN,
                     "ctrl_gens": CTRL_N_GEN,
                     "body_pop": BODY_POP_SIZE,
                     "ctrl_pop": CTRL_POP_SIZE
+                },
+                "performance_summary": {
+                    "best_fitness": float(best_fitness),
+                    "estimated_distance_forward": float((-2 + np.sqrt(4 + 4 * max(0, best_fitness))) / 2) if best_fitness > 0 else 0.0,
+                    "goal_progress_percent": float(100 * max(0, (-2 + np.sqrt(4 + 4 * max(0, best_fitness))) / 2) / 5.8) if best_fitness > 0 else 0.0
                 },
                 "cache_stats": {
                     "total_architectures_cached": len(_BODY_ARCH_CACHE),
@@ -1008,10 +1152,10 @@ def main():
                 }
             }
             
-            with open(DATA / "best_controller_stable.json", "w") as f:
+            with open(DATA / "best_controller_goal_focused.json", "w") as f:
                 json.dump(controller_data, f, indent=2)
             
-            console.log(f"[Co-Evolution] Saved best controller to {DATA / 'best_controller_stable.json'}")
+            console.log(f"[Co-Evolution] Saved best controller to {DATA / 'best_controller_goal_focused.json'}")
             console.log(f"[Co-Evolution] Controller architecture: {arch.inp_size} → {CTRL_HIDDEN} → {arch.out_size}")
             console.log(f"[Co-Evolution] Final controller fitness: {best_fitness:.4f}")
             console.log(f"[Co-Evolution] Total architectures cached: {len(_BODY_ARCH_CACHE)}")
