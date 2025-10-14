@@ -37,7 +37,7 @@ from typing import Any, Literal
 import mujoco as mj
 import numpy as np
 import numpy.typing as npt
-from deap import base, creator, tools
+from deap import base, creator, tools # type: ignore
 from rich.console import Console
 
 # =========================
