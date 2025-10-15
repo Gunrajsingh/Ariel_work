@@ -1,13 +1,3 @@
-# A3_erik_PROPER_COEVOLUTION.py
-# PROPER CO-EVOLUTION: Re-train controllers periodically, don't cache forever
-#
-# KEY CHANGES:
-# 1. Controllers are RE-TRAINED every N generations (not cached forever)
-# 2. Longer controller evolution: 30×20 = 600 evaluations
-# 3. Higher viability threshold: Must move > 1.0m to be considered
-# 4. Smaller body population (15) but MUCH better controller training
-# 5. Track "controller training generation" - retrain when stale
-
 from __future__ import annotations
 
 import json
@@ -33,9 +23,8 @@ from ariel.simulation.environments import OlympicArena
 
 console = Console()
 
-# =========================
 # PROPER CO-EVOLUTION PARAMETERS
-# =========================
+
 SCRIPT_NAME = "A3_erik_proper_coevo"
 CWD = Path(".").resolve()
 DATA = CWD / "__data__" / SCRIPT_NAME
@@ -44,26 +33,26 @@ DATA.mkdir(parents=True, exist_ok=True)
 SEED = 42
 RNG = np.random.default_rng(SEED)
 
-# Body EA parameters - SMALLER population, better quality
-BODY_POP_SIZE = 8 # 30           # Smaller: focus on quality over quantity
-BODY_N_GEN = 5 # 30              # More generations
+# Body EA parameters 
+BODY_POP_SIZE = 8 # 30           
+BODY_N_GEN = 5 # 30              
 BODY_TOURNSIZE = 3
 BODY_CXPB = 0.7
 BODY_MUTPB = 0.5
 BODY_SBX_ETA = 15.0
 BODY_ELITE_K = 3
 
-# Controller EA parameters - MUCH LONGER training
-CTRL_POP_SIZE = 8 # 30           # DOUBLED from aggressive
-CTRL_N_GEN = 5 # 20              # INCREASED from aggressive
-CTRL_TOURNSIZE = 3           # Total: 600 evals per body!
+# Controller EA parameters 
+CTRL_POP_SIZE = 8 # 30           
+CTRL_N_GEN = 5 # 20              
+CTRL_TOURNSIZE = 3           
 CTRL_CXPB = 0.8
 CTRL_MUTPB = 0.2
 CTRL_SBX_ETA = 15.0
 
 # Controller re-training policy
-RETRAIN_EVERY_N_GEN = 5      # Re-train controllers every 5 generations
-VIABILITY_THRESHOLD = 2.0    # Must achieve fitness > 6.0 (≈1.0m to be considered)
+RETRAIN_EVERY_N_GEN = 5     
+VIABILITY_THRESHOLD = 2.0    
 
 # Sim settings
 SIM_DURATION = 15.0
@@ -91,9 +80,8 @@ PROBE_STEPS = 600
 VERBOSE = False
 _CTRL_UNLIM_SCALE = np.pi / 2
 
-# =========================
 # Types & caching with GENERATION TRACKING
-# =========================
+
 @dataclass
 class BuiltBody:
     nde: NeuralDevelopmentalEncoding
@@ -125,9 +113,8 @@ def body_geno_to_key(geno) -> str:
     t, c, r = geno
     return (t.tobytes() + c.tobytes() + r.tobytes()).hex()
 
-# =========================
 # NDE body building
-# =========================
+
 def build_body(geno: tuple[np.ndarray, np.ndarray, np.ndarray], nde_modules: int, rng: np.random.Generator) -> BuiltBody:
     try:
         t, c, r = geno
@@ -216,9 +203,8 @@ def get_body_architecture(body_geno_key: str, body_geno) -> BodyArchitecture:
         _BODY_ARCH_CACHE[body_geno_key] = arch
         return arch
 
-# =========================
 # Controller (MLP)
-# =========================
+
 def controller_theta_size(inp: int, hidden: int, out_dim: int) -> int:
     return inp*hidden + hidden + hidden*hidden + hidden + hidden*out_dim + out_dim
 
@@ -243,9 +229,8 @@ def mlp_forward(x, params):
     y  = h2 @ W3 + b3
     return y
 
-# =========================
 # EXPONENTIAL FITNESS
-# =========================
+
 def _estimate_ttf(x_hist: list[float], t_hist: list[float], L: float) -> float:
     for i in range(1, len(x_hist)):
         if x_hist[i-1] < L <= x_hist[i]:
@@ -301,9 +286,8 @@ def apply_warmup_and_rate_limit(model: mj.MjModel, u_target: np.ndarray, u_prev:
     du = np.clip(u_ramped - u_prev, -du_lim, du_lim)
     return u_prev + du
 
-# =========================
 # Episode runner
-# =========================
+
 def _body_x(model: mj.MjModel, data: mj.MjData, name: Optional[str]) -> float:
     try:
         if name:
@@ -376,9 +360,9 @@ def run_episode_with_controller(body_arch: BodyArchitecture, theta: np.ndarray, 
     path = [[start_x, 0.0, 0.0], [start_x + (x_hist[-1] if x_hist else 0.0), 0.0, 0.0]]
     return float(fitness), path
 
-# =========================
+
 # CONTROLLER EA WITH RE-TRAINING SUPPORT
-# =========================
+
 def controller_sbx_crossover(parent1, parent2, eta=CTRL_SBX_ETA, rng=None):
     rng = rng or np.random.default_rng()
     a = np.asarray(parent1, dtype=float)
@@ -508,9 +492,7 @@ def evolve_controller_for_body(body_geno, current_generation: int, verbose=False
 
     return best_theta, best_fit
 
-# =========================
 # Distance probing
-# =========================
 def probe_best_metrics(body_arch: BodyArchitecture, theta: np.ndarray) -> tuple[float, float]:
     if not body_arch.viable:
         return 0.0, TRACK_LENGTH
@@ -524,9 +506,8 @@ def probe_best_metrics(body_arch: BodyArchitecture, theta: np.ndarray) -> tuple[
     remaining = max(0.0, TRACK_LENGTH - dist)
     return dist, remaining
 
-# =========================
 # BODY EA EVALUATION
-# =========================
+
 def evaluate_body_genotype(body_geno, current_generation: int):
     """
     Evaluate a body by:
@@ -544,9 +525,7 @@ def evaluate_body_genotype(body_geno, current_generation: int):
 
     return (fit,)
 
-# =========================
 # BODY EA OPERATORS
-# =========================
 def body_sbx_crossover(parent1, parent2, eta=BODY_SBX_ETA, rng=None):
     rng = rng or np.random.default_rng()
     t1, c1, r1 = parent1
@@ -597,9 +576,7 @@ def init_body_genotype(rng: np.random.Generator):
     r = rng.random(BODY_L).astype(np.float32)
     return (t, c, r)
 
-# =========================
 # DEAP SETUP
-# =========================
 creator.create("FitnessMax", base.Fitness, weights=(1.0,))
 creator.create("Individual", list, fitness=creator.FitnessMax)
 
@@ -619,19 +596,12 @@ def _hof_similar(ind1, ind2) -> bool:
             np.allclose(c1, c2, atol=1e-6) and
             np.allclose(r1, r2, atol=1e-6))
 
-# =========================
-# MAIN EA LOOP
-# =========================
-
-# =========================
 # HYPERPARAMETER TUNING (budgeted)
-# =========================
 from contextlib import contextmanager
 
 # Budget
-TUNE_N_CANDIDATES = 16       # total random configs to try (includes baseline)
-TUNE_TOP_K = 4              # keep top-K for stage 2
-
+TUNE_N_CANDIDATES = 16      
+TUNE_TOP_K = 4              
 def _reset_caches():
     _BODY_ARCH_CACHE.clear()
     _BEST_CTRL_CACHE.clear()
