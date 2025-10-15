@@ -1,15 +1,5 @@
 from __future__ import annotations
 
-# A3_erik_PROPER_COEVOLUTION.py
-# PROPER CO-EVOLUTION WITH ELITISM
-#
-# KEY FIXES (v2):
-# 1. ELITISM: Both body and controller EAs preserve best individuals
-# 2. CONTROLLER CACHING: Never retrain (use cache forever for consistency)
-# 3. LONGER TRAINING: 50×50 = 2500 evaluations per body
-# 4. HIGHER VIABILITY: fitness > 6.0 (≈1.0m minimum movement)
-# 5. REDUCED MUTATION: 0.3 instead of 0.5 (less destructive)
-# 6. REDUCED IMMIGRATION: 10% instead of 25% (less disruption)
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
