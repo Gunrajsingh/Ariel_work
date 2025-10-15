@@ -41,9 +41,9 @@ from ariel.utils.runners import simple_runner
 
 console = Console()
 
-# =========================
-# PROPER CO-EVOLUTION PARAMETERS
-# =========================
+
+#CO-EVOLUTION PARAMETERS
+
 SCRIPT_NAME = "A3_erik_proper_coevo"
 CWD = Path(".").resolve()
 DATA = CWD / "__data__" / SCRIPT_NAME
@@ -52,33 +52,33 @@ DATA.mkdir(parents=True, exist_ok=True)
 SEED = 42
 RNG = np.random.default_rng(SEED)
 N_ATTEMPTS = 5
-# Body EA parameters - SMALLER population, better quality
-BODY_POP_SIZE = 15  #25         # Slightly reduced for faster iterations
-BODY_N_GEN = 15              # More generations
+# Body EA parameters
+BODY_POP_SIZE = 15  #25         
+BODY_N_GEN = 15              
 BODY_TOURNSIZE = 3
 BODY_CXPB = 0.8
-BODY_MUTPB = 0.25             # REDUCED from 0.5 - less destructive mutations
+BODY_MUTPB = 0.25             
 BODY_SBX_ETA = 10.0
-BODY_ELITE_K = 5             # Increased from 3 - preserve more good solutions
+BODY_ELITE_K = 5             
 
-# Controller EA parameters - Research-backed configuration
-CTRL_POP_SIZE = 25   #25        # Research minimum: 40-50
-CTRL_N_GEN = 15    # 20          # Total: 50×50 = 2,500 evals per body
+# Controller EA parameters
+CTRL_POP_SIZE = 25           
+CTRL_N_GEN = 15    
 CTRL_TOURNSIZE = 3
-CTRL_CXPB = 0.4              # REDUCED from 0.8 (crossover destructive for weights)
-CTRL_MUTPB = 0.15             # INCREASED from 0.2 (mutation primary operator)
+CTRL_CXPB = 0.4              
+CTRL_MUTPB = 0.15             
 CTRL_SBX_ETA = 10.0
-CTRL_ELITE_K = 3             # Preserve best controllers
+CTRL_ELITE_K = 3             
 
-# Controller caching policy - Controllers represent learned behavior
-RETRAIN_EVERY_N_GEN = 999999 # Cache forever: Once trained, controller is the learned behavior
-VIABILITY_THRESHOLD = 2.0    # REDUCED from 4.0: More lenient for initial diversity (≈0.46m)
+# Controller caching policy 
+RETRAIN_EVERY_N_GEN = 999999 
+VIABILITY_THRESHOLD = 2.0    
 
 # Sim settings
 SIM_DURATION = 15.0
 WARMUP_STEPS = 50
 STALL_WINDOW_SEC = 2.5
-STALL_EPS = 0.02  # 20mm movement required to avoid early termination
+STALL_EPS = 0.02  
 RATE_LIMIT_FRAC = 0.08
 
 SPAWN_POS = [-0.8, 0, 0.1]
@@ -100,9 +100,8 @@ PROBE_STEPS = 600
 VERBOSE = False
 _CTRL_UNLIM_SCALE = np.pi / 2
 
-# =========================
-# Types & caching with GENERATION TRACKING
-# =========================
+
+
 @dataclass
 class BuiltBody:
     nde: NeuralDevelopmentalEncoding
@@ -134,9 +133,9 @@ def body_geno_to_key(geno) -> str:
     t, c, r = geno
     return (t.tobytes() + c.tobytes() + r.tobytes()).hex()
 
-# =========================
+
 # NDE body building
-# =========================
+
 def build_body(geno: tuple[np.ndarray, np.ndarray, np.ndarray], nde_modules: int, rng: np.random.Generator) -> BuiltBody:
     try:
         t, c, r = geno
@@ -225,9 +224,8 @@ def get_body_architecture(body_geno_key: str, body_geno) -> BodyArchitecture:
         _BODY_ARCH_CACHE[body_geno_key] = arch
         return arch
 
-# =========================
 # Controller (MLP)
-# =========================
+
 def controller_theta_size(inp: int, hidden: int, out_dim: int) -> int:
     return inp*hidden + hidden + hidden*hidden + hidden + hidden*out_dim + out_dim
 
@@ -252,9 +250,9 @@ def mlp_forward(x, params):
     y  = h2 @ W3 + b3
     return y
 
-# =========================
-# EXPONENTIAL FITNESS
-# =========================
+
+# FITNESS
+
 def _estimate_ttf(x_hist: list[float], t_hist: list[float], L: float) -> float:
     for i in range(1, len(x_hist)):
         if x_hist[i-1] < L <= x_hist[i]:
@@ -310,9 +308,9 @@ def apply_warmup_and_rate_limit(model: mj.MjModel, u_target: np.ndarray, u_prev:
     du = np.clip(u_ramped - u_prev, -du_lim, du_lim)
     return u_prev + du
 
-# =========================
+
 # Episode runners & helpers
-# =========================
+
 def _body_x(model: mj.MjModel, data: mj.MjData, name: Optional[str]) -> float:
     try:
         if name:
@@ -342,7 +340,7 @@ def run_episode_with_controller(body_arch: BodyArchitecture, theta: np.ndarray, 
     """
     Runs one episode and returns:
       - fitness (float)
-      - full absolute coordinate history: [[x, y, t], ...] (time included as 3rd value)
+      - full absolute coordinate history
     """
     if not body_arch or not body_arch.viable:
         return -1e6, [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
@@ -359,10 +357,10 @@ def run_episode_with_controller(body_arch: BodyArchitecture, theta: np.ndarray, 
     if params is None:
         return -1e6, [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
 
-    # Histories
+    
     x_hist_rel: list[float] = []
     t_hist: list[float] = []
-    path_history: list[list[float]] = []  # [[x_abs, y_abs, t], ...]
+    path_history: list[list[float]] = [] 
 
     u_prev = np.zeros(OUT, dtype=float)
     start_x, start_y = _body_xy(model, data, body_arch.track_body_name)
@@ -385,7 +383,7 @@ def run_episode_with_controller(body_arch: BodyArchitecture, theta: np.ndarray, 
 
         mj.mj_step(model, data)
 
-        # Absolute positions for plotting; relative x for fitness/stall checks
+        # Absolute positions for plotting
         x_abs, y_abs = _body_xy(model, data, body_arch.track_body_name)
         x_hist_rel.append(x_abs - start_x)
         t_hist.append(float(data.time))
@@ -401,18 +399,18 @@ def run_episode_with_controller(body_arch: BodyArchitecture, theta: np.ndarray, 
             j = 0
             while j < len(t_hist) - 1 and t_hist[j + 1] < t_goal:
                 j += 1
-            last_progress_check_t = t_hist[-1]  # Update checkpoint BEFORE break
+            last_progress_check_t = t_hist[-1]  #
             if (x_hist_rel[-1] - x_hist_rel[j]) < STALL_EPS:
                 break
 
     fitness, _ = compute_race_fitness_exponential(x_hist_rel, t_hist, TRACK_LENGTH)
 
-    # Return full absolute coordinate history (with time included as third element)
+
     return float(fitness), path_history
 
-# =========================
+
 # CONTROLLER EA WITH RE-TRAINING SUPPORT
-# =========================
+
 def controller_sbx_crossover(parent1, parent2, eta=CTRL_SBX_ETA, rng=None):
     rng = rng or np.random.default_rng()
     a = np.asarray(parent1, dtype=float)
@@ -498,9 +496,7 @@ def evolve_controller_for_body(body_geno, current_generation: int, verbose=False
     best_theta = pop[best_idx].copy()
     best_fit = fitness_vals[best_idx]
 
-    # Evolution loop
     for gen in range(CTRL_N_GEN):
-        # Selection
         selected_indices = []
         for _ in range(CTRL_POP_SIZE):
             contestants = RNG.choice(CTRL_POP_SIZE, size=CTRL_TOURNSIZE, replace=False)
@@ -524,7 +520,7 @@ def evolve_controller_for_body(body_geno, current_generation: int, verbose=False
             fit, _ = run_episode_with_controller(arch, theta, steps=PROBE_STEPS)
             new_fitness_vals.append(fit)
 
-        # ELITISM: Replace worst offspring with elites (not first 3!)
+        # ELITISM: Replace worst offspring with elites
         elite_indices = np.argsort(fitness_vals)[-CTRL_ELITE_K:]
         elite_controllers = [pop[i].copy() for i in elite_indices]
         elite_fits = [fitness_vals[i] for i in elite_indices]
@@ -553,9 +549,9 @@ def evolve_controller_for_body(body_geno, current_generation: int, verbose=False
 
     return best_theta, best_fit
 
-# =========================
+
 # Distance probing
-# =========================
+
 def probe_best_metrics(body_arch: BodyArchitecture, theta: np.ndarray) -> tuple[float, float]:
     if not body_arch.viable:
         return 0.0, TRACK_LENGTH
@@ -569,9 +565,9 @@ def probe_best_metrics(body_arch: BodyArchitecture, theta: np.ndarray) -> tuple[
     remaining = max(0.0, TRACK_LENGTH - dist)
     return dist, remaining
 
-# =========================
+
 # BODY EA EVALUATION
-# =========================
+
 def evaluate_body_genotype(body_geno, current_generation: int):
     """
     Evaluate a body by:
@@ -589,9 +585,9 @@ def evaluate_body_genotype(body_geno, current_generation: int):
 
     return (fit,)
 
-# =========================
+
 # BODY EA OPERATORS
-# =========================
+
 def body_sbx_crossover(parent1, parent2, eta=BODY_SBX_ETA, rng=None):
     rng = rng or np.random.default_rng()
     t1, c1, r1 = parent1
@@ -642,9 +638,9 @@ def init_body_genotype(rng: np.random.Generator):
     r = rng.random(BODY_L).astype(np.float32)
     return (t, c, r)
 
-# =========================
+
 # DEAP SETUP
-# =========================
+
 creator.create("FitnessMax", base.Fitness, weights=(1.0,))
 creator.create("Individual", list, fitness=creator.FitnessMax)
 
@@ -664,9 +660,9 @@ def _hof_similar(ind1, ind2) -> bool:
             np.allclose(c1, c2, atol=1e-6) and
             np.allclose(r1, r2, atol=1e-6))
 
-# =========================
+
 # MAIN EA LOOP
-# =========================
+
 def run_proper_coevolution_ea():
     console.log(f"[PROPER CO-EVOLUTION WITH ELITISM] Starting...")
     console.log(f"  Body pop: {BODY_POP_SIZE}, Controller: {CTRL_POP_SIZE}×{CTRL_N_GEN}={CTRL_POP_SIZE*CTRL_N_GEN} evals")
@@ -753,7 +749,7 @@ def run_proper_coevolution_ea():
 
         # Immigration if stagnating
         if no_improve >= 3:
-            n_immigrants = max(2, int(0.10 * BODY_POP_SIZE))  # REDUCED from 25% to 10%
+            n_immigrants = max(2, int(0.10 * BODY_POP_SIZE))  
             console.log(f"  [Diversity] Adding {n_immigrants} immigrants (stagnation={no_improve}, mutpb={adapt_mutpb:.2f})")
             for _ in range(n_immigrants):
                 offspring.append(toolbox.individual())
@@ -768,24 +764,20 @@ def run_proper_coevolution_ea():
 
         # ELITISM: Replace population while keeping best individuals
         combined = pop + offspring
-        # Filter out invalid fitness values (but be more lenient to avoid empty population)
+        # Filter out invalid fitness values 
         valid_combined = [ind for ind in combined if ind.fitness.valid and ind.fitness.values[0] > -5e5]
 
-        # If we have enough valid individuals, use them
+        
         if len(valid_combined) >= BODY_POP_SIZE:
-            # Sort by fitness (best first)
             valid_combined.sort(key=lambda x: x.fitness.values[0], reverse=True)
-            # Keep top BODY_POP_SIZE individuals
             pop[:] = valid_combined[:BODY_POP_SIZE]
         elif len(valid_combined) > 0:
-            # If we have some valid individuals but not enough, keep them all
             valid_combined.sort(key=lambda x: x.fitness.values[0], reverse=True)
             pop[:] = valid_combined
             console.log(f"  [WARNING] Only {len(valid_combined)} viable bodies found, continuing with reduced population")
         else:
-            # Emergency: no valid individuals, keep old population
             console.log(f"  [WARNING] No viable offspring, keeping old population")
-            # pop stays the same
+            
 
         # Update hall of fame
         if len(pop) > 0:
@@ -869,9 +861,9 @@ def plot_robot_path(history, save_path: Path):
         plt.close()
     except:
         pass
-# =========================
+
 # BASELINE: Random initialization + selection only (no learning)
-# =========================
+
 def evolve_controller_random_for_body(body_geno, verbose=False):
     """
     Baseline controller "training":
@@ -977,7 +969,6 @@ def run_baseline_random_selection():
                 save_body_artifacts(DATA, built, tag=f"baseline_gen_{gen:03d}_best")
                 key = body_geno_to_key(gen_best[0])
                 arch = get_body_architecture(key, gen_best[0])
-                # Use baseline controller sampling again to get a theta for distance probing
                 theta, _bf = evolve_controller_random_for_body(gen_best[0], verbose=False)
                 if theta is not None and arch and arch.viable:
                     dist, _ = probe_best_metrics(arch, theta)
@@ -1098,7 +1089,6 @@ def main():
     console.log("  5. REDUCED MUTATION: 0.3 (more conservative)")
     console.log("="*70 + "\n")
 
-    # # === BASELINE RUN ===
     console.log('\n' + '='*70)
     console.log('[BASELINE RUN] Random init + selection only (no learning)')
     console.log('='*70)
@@ -1170,14 +1160,12 @@ def main():
     )
 
     try:
-        # --- Prepare arrays ---
-        # Stack learning runs' distance curves: shape (N_ATTEMPTS, G)
         dist_stack = np.vstack(dist_runs)  # each element already np.array
         # Mean/Std across attempts per generation
         dist_mean = np.mean(dist_stack, axis=0)
         dist_std  = np.std(dist_stack, axis=0)
 
-        # --- Plot 1: absolute distance comparison (learning avg vs baseline) ---
+        # Plot 1: absolute distance comparison
         plt.figure(figsize=(10, 5))
         plt.plot(avg_dist_curve, label="Learning (avg of 5)", linewidth=2)
         plt.plot(base_dist_curve, label="Baseline (random)", linewidth=2, linestyle="--")
@@ -1191,16 +1179,13 @@ def main():
         plt.close()
         console.log(f"[Saved] {out1}")
 
-        # --- Plot 2: Z-scores of distance per generation ---
-        # Choose the single best learning run by final distance
+        # --- Plot 2: Z-scores of distance per generation
         best_run_idx = int(np.argmax([runs[-1] for runs in dist_runs]))
         best_run_dist = dist_runs[best_run_idx]
 
         # Avoid division by zero
         eps = 1e-9
         z_best_run = (best_run_dist - dist_mean) / np.maximum(dist_std, eps)
-        # Compare baseline to learning distribution as well
-        # (Truncate or pad baseline to match length, though lengths should match)
         L = min(len(base_dist_curve), len(dist_mean))
         base_d_aligned = np.asarray(base_dist_curve[:L], dtype=float)
         mean_aligned   = dist_mean[:L]
@@ -1223,19 +1208,6 @@ def main():
     except Exception as e:
         console.log(f"[Plot Error] Could not generate distance plots: {e}")
 
-
-
-    # console.log("\n" + "="*70)
-    # console.log("[FINAL RESULTS]")
-    # console.log("\n" + "="*70)
-    # console.log("[BASELINE RESULTS]")
-    # if base_fit_curve:
-    #     console.log(f"  Baseline best fitness: {base_fit_curve[-1]:.1f}")
-    # if base_dist_curve:
-    #     console.log(f"  Baseline best distance: {base_dist_curve[-1]:.2f}m / {TRACK_LENGTH:.2f}m ({100*base_dist_curve[-1]/TRACK_LENGTH:.1f}%)")
-    # console.log("="*70)
-
-    # Save baseline best body & plot its path
     try:
         built_b = build_body(base_best[0], nde_modules=NUM_OF_MODULES, rng=RNG)
         save_body_artifacts(DATA, built_b, tag="BASELINE_FINAL_BEST")
@@ -1255,7 +1227,6 @@ def main():
     console.log(f"  Best distance: {dist_curve[-1]:.2f}m / {TRACK_LENGTH:.2f}m ({100*dist_curve[-1]/TRACK_LENGTH:.1f}%)")
     console.log("="*70)
 
-    # Save best body
     try:
         built = build_body(best_overall[0], nde_modules=NUM_OF_MODULES, rng=RNG)
         save_body_artifacts(DATA, built, tag="FINAL_BEST")
@@ -1263,7 +1234,6 @@ def main():
     except Exception as e:
         console.log(f"[Error] Could not save final best: {e}")
 
-    # NEW: run episode for the best and save/plot full coordinate history
 
     try:
         key = body_geno_to_key(best_overall[0])
@@ -1281,7 +1251,7 @@ def main():
             video_mp4 = DATA / "final_best_10s.mp4"
             ok = create_robot_video(best_overall[0], theta, video_mp4, duration=10, fps=30, width=1280, height=720)
             if not ok:
-                # Fallback to GIF if ffmpeg codec not available
+        
                 video_gif = DATA / "final_best_10s.gif"
                 _ = create_robot_video(best_overall[0], theta, video_gif, duration=10, fps=30, width=1280, height=720)            
             
