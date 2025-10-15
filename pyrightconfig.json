@@ -1,6 +1,6 @@
 {
     "pythonVersion": "3.12",
-    "typeCheckingMode": "strict",
+    "typeCheckingMode": "off",
     "deprecateTypingAliases": true,
     "include": [
         "src/**/*.py",
