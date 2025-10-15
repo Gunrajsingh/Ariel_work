@@ -26,6 +26,7 @@ import mujoco as mj
 import numpy as np
 from deap import base, creator, tools
 from rich.console import Console
+import imageio.v2 as imageio
 
 from ariel.body_phenotypes.robogen_lite.constructor import construct_mjspec_from_graph
 from ariel.body_phenotypes.robogen_lite.decoders.hi_prob_decoding import (
@@ -34,6 +35,9 @@ from ariel.body_phenotypes.robogen_lite.decoders.hi_prob_decoding import (
 )
 from ariel.ec.genotypes.nde import NeuralDevelopmentalEncoding
 from ariel.simulation.environments import OlympicArena
+
+from ariel.utils.tracker import Tracker
+from ariel.utils.runners import simple_runner
 
 console = Console()
 
@@ -47,7 +51,7 @@ DATA.mkdir(parents=True, exist_ok=True)
 
 SEED = 42
 RNG = np.random.default_rng(SEED)
-N_ATTEMPTS = 5
+N_ATTEMPTS = 1
 # Body EA parameters - SMALLER population, better quality
 BODY_POP_SIZE = 10  #25         # Slightly reduced for faster iterations
 BODY_N_GEN = 10              # More generations
@@ -992,6 +996,96 @@ def run_baseline_random_selection():
     return best_overall_ind, best_per_gen, dist_per_gen, mean_per_gen, std_per_gen, zbest_per_gen
 
 
+def create_robot_video(body_geno, controller_theta, save_path: Path,
+                       duration: int = 10, fps: int = 30,
+                       width: int = 1280, height: int = 720) -> bool:
+    """
+    Render a controller-driven video for `duration` seconds.
+    Follows (and refactors) the provided snippet:
+      - Uses mj.Renderer + free camera
+      - Recenters camera on the tracked body each frame
+      - Streams frames directly to an mp4/gif (no giant RAM buffer)
+    """
+    try:
+        key = body_geno_to_key(body_geno)
+        arch = get_body_architecture(key, body_geno)
+        if not arch or not arch.viable:
+            console.log("[Video] Body architecture not viable.")
+            return False
+
+        model = arch.model
+        data = mj.MjData(model)
+        mj.mj_resetData(model, data)
+        mj.mj_forward(model, data)
+        mj.set_mjcb_control(None)
+
+        # Controller params
+        INP, OUT = arch.inp_size, arch.out_size
+        params = unpack_controller_theta(controller_theta, INP, CTRL_HIDDEN, OUT)
+        if params is None:
+            console.log("[Video] Controller params invalid (size mismatch).")
+            return False
+
+        # Renderer + camera
+        renderer = mj.Renderer(model, height=height, width=width)
+        camera = mj.MjvCamera()
+        camera.type = mj.mjtCamera.mjCAMERA_FREE
+        camera.lookat = [2.5, 0.0, 0.5]
+        camera.distance = 8.0
+        camera.azimuth = 180
+        camera.elevation = -30
+
+        # Timing
+        dt = float(model.opt.timestep)
+        steps_per_frame = max(1, int(round(1.0 / (fps * dt))))
+        n_frames = int(duration * fps)
+
+        # Control state
+        u_prev = np.zeros(OUT, dtype=float)
+
+        # Ensure parent folder exists
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+
+        console.log(f"[Video] Recording {duration}s @{fps}fps → {n_frames} frames (steps/frame={steps_per_frame})")
+        with imageio.get_writer(str(save_path), fps=fps) as writer:
+            for frame_idx in range(n_frames):
+                # Advance physics to the next frame boundary
+                for step_idx in range(steps_per_frame):
+                    tsec = float(data.time)
+                    tf = np.array([tsec, math.sin(2 * math.pi * tsec), math.cos(2 * math.pi * tsec)], dtype=float)
+                    obs = np.concatenate([np.array(data.qpos, dtype=float), np.array(data.qvel, dtype=float), tf])
+
+                    u_nn = mlp_forward(obs, params)
+                    u_raw = np.tanh(u_nn)
+                    u_cmd = scale_to_ctrlrange(model, u_raw)
+                    # Global step index is for warmup; approximate with total inner steps so far
+                    global_step = frame_idx * steps_per_frame + step_idx
+                    u_apply = apply_warmup_and_rate_limit(model, u_cmd, u_prev, global_step)
+                    data.ctrl[:] = u_apply
+                    u_prev = u_apply
+
+                    mj.mj_step(model, data)
+
+                # Track body to keep camera centered
+                try:
+                    bid = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, arch.track_body_name) if arch.track_body_name else -1
+                    if bid != -1:
+                        robot_pos = data.xpos[bid]
+                        camera.lookat = [float(robot_pos[0]), float(robot_pos[1]), 0.5]
+                except Exception:
+                    pass
+
+                renderer.update_scene(data, camera=camera)
+                frame = renderer.render().copy()
+                writer.append_data(frame)
+
+        del renderer
+        console.log(f"[Video] Saved: {save_path}")
+        return True
+    except Exception as e:
+        console.log(f"[Video Error] {e}")
+        return False
+
 def main():
     console.log("\n" + "="*70)
     console.log("[PROPER CO-EVOLUTION WITH ELITISM - Robot Olympics]")
@@ -1170,6 +1264,7 @@ def main():
         console.log(f"[Error] Could not save final best: {e}")
 
     # NEW: run episode for the best and save/plot full coordinate history
+
     try:
         key = body_geno_to_key(best_overall[0])
         arch = get_body_architecture(key, best_overall[0])
@@ -1182,6 +1277,14 @@ def main():
                 json.dump({"history": history}, f, indent=2)
             console.log(f"[Saved] Best path plot to: {path_png}")
             console.log(f"[Saved] Best path coordinates to: {DATA / 'FINAL_BEST_path.json'}")
+
+            video_mp4 = DATA / "final_best_10s.mp4"
+            ok = create_robot_video(best_overall[0], theta, video_mp4, duration=10, fps=30, width=1280, height=720)
+            if not ok:
+                # Fallback to GIF if ffmpeg codec not available
+                video_gif = DATA / "final_best_10s.gif"
+                _ = create_robot_video(best_overall[0], theta, video_gif, duration=10, fps=30, width=1280, height=720)            
+            
         else:
             console.log("[Warn] Could not obtain controller or architecture for plotting.")
     except Exception as e:
