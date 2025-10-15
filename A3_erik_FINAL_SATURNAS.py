@@ -51,10 +51,10 @@ DATA.mkdir(parents=True, exist_ok=True)
 
 SEED = 42
 RNG = np.random.default_rng(SEED)
-N_ATTEMPTS = 1
+N_ATTEMPTS = 5
 # Body EA parameters - SMALLER population, better quality
-BODY_POP_SIZE = 10  #25         # Slightly reduced for faster iterations
-BODY_N_GEN = 10              # More generations
+BODY_POP_SIZE = 15  #25         # Slightly reduced for faster iterations
+BODY_N_GEN = 15              # More generations
 BODY_TOURNSIZE = 3
 BODY_CXPB = 0.8
 BODY_MUTPB = 0.25             # REDUCED from 0.5 - less destructive mutations
@@ -62,8 +62,8 @@ BODY_SBX_ETA = 10.0
 BODY_ELITE_K = 5             # Increased from 3 - preserve more good solutions
 
 # Controller EA parameters - Research-backed configuration
-CTRL_POP_SIZE = 5   #25        # Research minimum: 40-50
-CTRL_N_GEN = 8    # 20          # Total: 50×50 = 2,500 evals per body
+CTRL_POP_SIZE = 25   #25        # Research minimum: 40-50
+CTRL_N_GEN = 15    # 20          # Total: 50×50 = 2,500 evals per body
 CTRL_TOURNSIZE = 3
 CTRL_CXPB = 0.4              # REDUCED from 0.8 (crossover destructive for weights)
 CTRL_MUTPB = 0.15             # INCREASED from 0.2 (mutation primary operator)
